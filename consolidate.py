@@ -101,14 +101,16 @@ def apply_prevalence_scoring(scenes: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     supp_mult  = cfg.get("prevalence_suppression_multiplier", 0.2)
     boost_mult = cfg.get("prevalence_boost_multiplier", 1.5)
 
-    # Count unique devices per DetectionType across all loaded data
+    # Count unique devices per Evidence pattern (exact command/key match)
+    # — mirrors the KQL prevalence key so "LOLBin Execution" on 11 devices
+    #   doesn't suppress a unique certutil command seen only on 1 device.
     env_counts = (
-        scenes.groupby("DetectionType")["DeviceName"]
+        scenes.groupby("Evidence")["DeviceName"]
         .nunique()
         .rename("EnvDeviceCount")
         .reset_index()
     )
-    scenes = scenes.merge(env_counts, on="DetectionType", how="left")
+    scenes = scenes.merge(env_counts, on="Evidence", how="left")
 
     def _multiplier(count):
         if count > supp_threshold:
@@ -122,11 +124,12 @@ def apply_prevalence_scoring(scenes: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         scenes["ScoreContribution"] * scenes["PrevalenceMultiplier"]
     ).round(1)
 
-    # Log any suppressed detection types
+    # Log any suppressed evidence patterns
     suppressed = env_counts[env_counts["EnvDeviceCount"] > supp_threshold]
     for _, row in suppressed.iterrows():
-        print(f"  [PREVALENCE] '{row['DetectionType']}' seen on {row['EnvDeviceCount']} devices "
-              f"— score multiplier {supp_mult}x (widespread, likely benign)")
+        preview = str(row["Evidence"])[:80]
+        print(f"  [PREVALENCE] Pattern seen on {row['EnvDeviceCount']} devices "
+              f"— score multiplier {supp_mult}x: {preview}...")
 
     return scenes
 
@@ -350,8 +353,10 @@ def write_excel(
         write_sheet("Attack Chains", attack_chains)
 
         # 4. Stacking Analysis — rarest patterns first (best FP-reduction view)
+        stacking_src = scenes.copy()
+        stacking_src["Evidence"] = stacking_src["Evidence"].str[:120]  # truncate for readability
         stacking = (
-            scenes.groupby(["TacticCategory", "DetectionType"])
+            stacking_src.groupby(["TacticCategory", "DetectionType", "Evidence"])
             .agg(
                 EnvDeviceCount=("DeviceName", "nunique"),
                 UniqueAccounts=("AccountName", "nunique"),
