@@ -1,0 +1,39 @@
+// ============================================================
+// Discovery Command Execution
+// TacticCategory: Discovery
+// Source: DeviceProcessEvents
+// ============================================================
+let lookback = 30d;
+let discovery_tools = dynamic([
+    "net.exe", "net1.exe", "nltest.exe", "whoami.exe", "ipconfig.exe",
+    "systeminfo.exe", "arp.exe", "nslookup.exe", "ping.exe", "tasklist.exe",
+    "quser.exe", "query.exe", "dsquery.exe", "dsget.exe", "netstat.exe",
+    "route.exe", "hostname.exe", "wmic.exe", "sc.exe", "reg.exe",
+    "gpresult.exe", "nbtstat.exe", "tracert.exe"
+]);
+let discovery_args = dynamic([
+    "user", "group", "localgroup", "view", "share", "session", "accounts",
+    "domain", "trust", "dclist", "domain_trusts", "/domain", "enum"
+]);
+DeviceProcessEvents
+| where Timestamp > ago(lookback)
+| where FileName in~ (discovery_tools)
+// Must be doing something reconnaissance-flavoured
+| where ProcessCommandLine has_any (discovery_args)
+    or FileName in~ ("whoami.exe", "systeminfo.exe", "ipconfig.exe", "hostname.exe")
+// Exclude known admin/IT tooling accounts if needed — add exclusions below
+// | where AccountName !in~ ("svc_monitoring", "it_admin")
+| extend AccountName = InitiatingProcessAccountName
+| extend Evidence = strcat(
+    "Process: ", FileName,
+    " | Parent: ", InitiatingProcessFileName,
+    " | CmdLine: ", ProcessCommandLine
+)
+| project
+    Timestamp,
+    DeviceName,
+    AccountName,
+    DetectionType = "Discovery Command",
+    TacticCategory = "Discovery",
+    Evidence
+| sort by Timestamp desc

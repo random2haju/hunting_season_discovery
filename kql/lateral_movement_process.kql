@@ -1,0 +1,43 @@
+// ============================================================
+// Lateral Movement via Remote Execution Tools
+// TacticCategory: LateralMovement
+// Source: DeviceProcessEvents
+// ============================================================
+let lookback = 30d;
+// Known remote exec tool names
+let remote_exec_tools = dynamic([
+    "psexec.exe", "psexec64.exe", "paexec.exe", "remcom.exe", "csexec.exe"
+]);
+// Suspicious parent-child relationships indicating remote execution
+DeviceProcessEvents
+| where Timestamp > ago(lookback)
+| where
+    // Direct remote exec tool usage
+    FileName in~ (remote_exec_tools)
+    // WMI spawning shells remotely
+    or (InitiatingProcessFileName =~ "wmiprvse.exe"
+        and FileName in~ ("cmd.exe", "powershell.exe", "wscript.exe", "cscript.exe", "mshta.exe"))
+    // MMC snap-in used for remote execution
+    or (InitiatingProcessFileName =~ "mmc.exe"
+        and FileName in~ ("cmd.exe", "powershell.exe"))
+    // DCOM-based lateral movement (dllhost spawning shells)
+    or (InitiatingProcessFileName =~ "dllhost.exe"
+        and FileName in~ ("cmd.exe", "powershell.exe", "net.exe"))
+    // AT/schtasks used to create remote tasks
+    or (FileName in~ ("at.exe", "schtasks.exe")
+        and ProcessCommandLine has_any ("\\\\", "/s ", "/create"))
+| extend AccountName = InitiatingProcessAccountName
+| extend Evidence = strcat(
+    "Process: ", FileName,
+    " | Parent: ", InitiatingProcessFileName,
+    " | CmdLine: ", ProcessCommandLine,
+    " | RemoteSession: ", tostring(LogonId)
+)
+| project
+    Timestamp,
+    DeviceName,
+    AccountName,
+    DetectionType = "Remote Execution Tool",
+    TacticCategory = "LateralMovement",
+    Evidence
+| sort by Timestamp desc

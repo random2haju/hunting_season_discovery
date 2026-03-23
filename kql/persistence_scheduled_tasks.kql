@@ -1,0 +1,51 @@
+// ============================================================
+// Scheduled Task Creation for Persistence
+// TacticCategory: Persistence
+// Source: DeviceProcessEvents + DeviceFileEvents
+// ============================================================
+let lookback = 30d;
+// Process-based: schtasks.exe or at.exe creating tasks
+let schtasks_process =
+    DeviceProcessEvents
+    | where Timestamp > ago(lookback)
+    | where FileName in~ ("schtasks.exe", "at.exe")
+    | where ProcessCommandLine has_any ("/create", "/change", "-create")
+    // Flag tasks pointing to suspicious locations or LOLBins
+    | where ProcessCommandLine has_any (
+        "\\AppData\\", "\\Temp\\", "\\Public\\", "\\ProgramData\\",
+        "powershell", "cmd.exe", "wscript", "cscript", "mshta", "rundll32",
+        "certutil", "regsvr32", "http", "ftp", "\\\\")
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "Process: ", FileName,
+        " | CmdLine: ", ProcessCommandLine,
+        " | Parent: ", InitiatingProcessFileName
+    )
+    | project Timestamp, DeviceName, AccountName, Evidence;
+// File-based: task XML files written outside expected system paths
+let schtasks_file =
+    DeviceFileEvents
+    | where Timestamp > ago(lookback)
+    | where FolderPath has "\\Windows\\System32\\Tasks\\"
+        or FolderPath has "\\Windows\\SysWOW64\\Tasks\\"
+    | where ActionType in ("FileCreated", "FileModified")
+    // Exclude Windows Update and common system tasks
+    | where InitiatingProcessFileName !in~ ("taskeng.exe", "taskhostw.exe", "svchost.exe", "TrustedInstaller.exe")
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "TaskFile: ", FolderPath, "\\", FileName,
+        " | CreatedBy: ", InitiatingProcessFileName,
+        " | Action: ", ActionType
+    )
+    | project Timestamp, DeviceName, AccountName, Evidence;
+union schtasks_process, schtasks_file
+| extend DetectionType = "Scheduled Task Created"
+| extend TacticCategory = "Persistence"
+| project
+    Timestamp,
+    DeviceName,
+    AccountName,
+    DetectionType,
+    TacticCategory,
+    Evidence
+| sort by Timestamp desc

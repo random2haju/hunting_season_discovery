@@ -1,0 +1,37 @@
+// ============================================================
+// Startup Folder Persistence
+// TacticCategory: Persistence
+// Source: DeviceFileEvents
+// ============================================================
+let lookback = 30d;
+let startup_paths = dynamic([
+    "\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\",
+    "\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\StartUp\\",
+    "\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\StartUp\\"
+]);
+let suspicious_extensions = dynamic([
+    ".exe", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".jse", ".wsf",
+    ".hta", ".lnk", ".url", ".scf", ".pif"
+]);
+DeviceFileEvents
+| where Timestamp > ago(lookback)
+| where ActionType in ("FileCreated", "FileModified", "FileRenamed")
+| where FolderPath has_any (startup_paths)
+| where FileName has_any (suspicious_extensions)
+// Exclude known installers dropping legitimate startup entries
+// | where InitiatingProcessFileName !in~ ("setup.exe", "installer.exe")
+| extend AccountName = InitiatingProcessAccountName
+| extend Evidence = strcat(
+    "StartupFile: ", FolderPath, "\\", FileName,
+    " | Action: ", ActionType,
+    " | DroppedBy: ", InitiatingProcessFileName,
+    " | DroppedByCmdLine: ", InitiatingProcessCommandLine
+)
+| project
+    Timestamp,
+    DeviceName,
+    AccountName,
+    DetectionType = "Startup Folder Drop",
+    TacticCategory = "Persistence",
+    Evidence
+| sort by Timestamp desc

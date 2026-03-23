@@ -1,0 +1,34 @@
+// ============================================================
+// LOLBin Execution Detection
+// TacticCategory: Execution
+// Source: DeviceProcessEvents
+// ============================================================
+let lookback = 30d;
+let lolbins = dynamic([
+    "certutil.exe", "mshta.exe", "wscript.exe", "cscript.exe",
+    "rundll32.exe", "regsvr32.exe", "msiexec.exe", "installutil.exe",
+    "cmstp.exe", "odbcconf.exe", "ieexec.exe", "forfiles.exe",
+    "bash.exe", "scriptrunner.exe", "pcalua.exe", "syncappvpublishingserver.exe",
+    "appsyncpublishingserver.exe", "control.exe", "csc.exe", "msbuild.exe",
+    "msdt.exe", "presentationhost.exe"
+]);
+DeviceProcessEvents
+| where Timestamp > ago(lookback)
+| where FileName in~ (lolbins)
+// Exclude common benign parent processes
+| where InitiatingProcessFileName !in~ ("msiexec.exe", "explorer.exe", "svchost.exe")
+    or ProcessCommandLine has_any ("http", "ftp", "\\\\", "base64", "decode", "download", "invoke", "iex", "bypass", "hidden", "encode")
+| extend AccountName = InitiatingProcessAccountName
+| extend Evidence = strcat(
+    "Process: ", FileName,
+    " | Parent: ", InitiatingProcessFileName,
+    " | CmdLine: ", ProcessCommandLine
+)
+| project
+    Timestamp,
+    DeviceName,
+    AccountName,
+    DetectionType = "LOLBin Execution",
+    TacticCategory = "Execution",
+    Evidence
+| sort by Timestamp desc

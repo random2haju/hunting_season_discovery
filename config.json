@@ -1,0 +1,10 @@
+{
+  "tactic_weights": {
+    "CredentialAccess": 10,
+    "LateralMovement": 8,
+    "Execution": 6,
+    "Persistence": 5,
+    "Discovery": 3
+  },
+  "episode_window_hours": 4
+}

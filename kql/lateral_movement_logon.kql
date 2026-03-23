@@ -1,0 +1,36 @@
+// ============================================================
+// Suspicious Logon Patterns (Lateral Movement)
+// TacticCategory: LateralMovement
+// Source: DeviceLogonEvents
+// ============================================================
+let lookback = 30d;
+DeviceLogonEvents
+| where Timestamp > ago(lookback)
+// Logon types of interest:
+//   3  = Network (e.g., SMB, net use)
+//   10 = RemoteInteractive (RDP)
+//   4  = Batch (scheduled tasks used for lateral movement)
+//   2  = Interactive (could be physical or pass-the-hash)
+| where LogonType in (3, 10)
+| where ActionType in ("LogonSuccess", "LogonFailed")
+// Exclude machine accounts and common service accounts
+| where AccountName !endswith "$"
+| where RemoteDeviceName != DeviceName   // Came from another machine
+| where isnotempty(RemoteDeviceName) or isnotempty(RemoteIP)
+| extend AccountName = AccountName
+| extend Evidence = strcat(
+    "LogonType: ", tostring(LogonType),
+    " | Action: ", ActionType,
+    " | SourceDevice: ", RemoteDeviceName,
+    " | SourceIP: ", RemoteIP,
+    " | TargetDevice: ", DeviceName,
+    " | Account: ", AccountName
+)
+| project
+    Timestamp,
+    DeviceName,
+    AccountName,
+    DetectionType = "Suspicious Logon",
+    TacticCategory = "LateralMovement",
+    Evidence
+| sort by Timestamp desc

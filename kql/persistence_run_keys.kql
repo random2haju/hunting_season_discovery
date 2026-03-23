@@ -1,0 +1,47 @@
+// ============================================================
+// Registry Run Key Modifications (Persistence)
+// TacticCategory: Persistence
+// Source: DeviceRegistryEvents
+// ============================================================
+let lookback = 30d;
+let run_key_paths = dynamic([
+    "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+    "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+    "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+    "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+    "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnceEx",
+    "HKEY_LOCAL_MACHINE\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run",
+    "HKEY_CURRENT_USER\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run",
+    // Winlogon hijack
+    "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
+    // Shell / UserInit override
+    "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\\Shell",
+    "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\\Userinit"
+]);
+DeviceRegistryEvents
+| where Timestamp > ago(lookback)
+| where ActionType in ("RegistryValueSet", "RegistryKeyCreated")
+| where RegistryKey has_any (run_key_paths)
+// Flag values pointing to suspicious locations or commands
+| where RegistryValueData has_any (
+    "\\AppData\\", "\\Temp\\", "\\Public\\", "\\ProgramData\\",
+    "powershell", "cmd.exe", "wscript", "cscript", "mshta", "rundll32",
+    "certutil", "regsvr32", "http", "ftp", "\\\\", "base64", "bypass", "hidden"
+)
+// Exclude known software updaters — add to exclusion list as needed
+// | where InitiatingProcessFileName !in~ ("setup.exe", "installer.exe")
+| extend AccountName = InitiatingProcessAccountName
+| extend Evidence = strcat(
+    "RegKey: ", RegistryKey,
+    " | ValueName: ", RegistryValueName,
+    " | Value: ", RegistryValueData,
+    " | SetBy: ", InitiatingProcessFileName
+)
+| project
+    Timestamp,
+    DeviceName,
+    AccountName,
+    DetectionType = "Run Key Modified",
+    TacticCategory = "Persistence",
+    Evidence
+| sort by Timestamp desc
