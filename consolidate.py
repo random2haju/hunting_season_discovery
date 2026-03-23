@@ -83,6 +83,55 @@ def load_scenes(data_dir: str, tactic_weights: dict) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Prevalence scoring
+# ---------------------------------------------------------------------------
+
+def apply_prevalence_scoring(scenes: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """
+    Adjust ScoreContribution based on how many devices showed each DetectionType.
+
+    Rare detections (few devices) get a score boost — they are more likely to be
+    genuine attacker activity. Widespread detections (many devices) get suppressed
+    — they are likely IT tooling or benign software that slipped through KQL filters.
+
+    Thresholds and multipliers are read from config.json.
+    """
+    supp_threshold = cfg.get("prevalence_suppression_threshold", 10)
+    boost_threshold = cfg.get("prevalence_boost_threshold", 3)
+    supp_mult  = cfg.get("prevalence_suppression_multiplier", 0.2)
+    boost_mult = cfg.get("prevalence_boost_multiplier", 1.5)
+
+    # Count unique devices per DetectionType across all loaded data
+    env_counts = (
+        scenes.groupby("DetectionType")["DeviceName"]
+        .nunique()
+        .rename("EnvDeviceCount")
+        .reset_index()
+    )
+    scenes = scenes.merge(env_counts, on="DetectionType", how="left")
+
+    def _multiplier(count):
+        if count > supp_threshold:
+            return supp_mult
+        if count <= boost_threshold:
+            return boost_mult
+        return 1.0
+
+    scenes["PrevalenceMultiplier"] = scenes["EnvDeviceCount"].apply(_multiplier)
+    scenes["ScoreContribution"] = (
+        scenes["ScoreContribution"] * scenes["PrevalenceMultiplier"]
+    ).round(1)
+
+    # Log any suppressed detection types
+    suppressed = env_counts[env_counts["EnvDeviceCount"] > supp_threshold]
+    for _, row in suppressed.iterrows():
+        print(f"  [PREVALENCE] '{row['DetectionType']}' seen on {row['EnvDeviceCount']} devices "
+              f"— score multiplier {supp_mult}x (widespread, likely benign)")
+
+    return scenes
+
+
+# ---------------------------------------------------------------------------
 # Episode clustering
 # ---------------------------------------------------------------------------
 
@@ -300,21 +349,38 @@ def write_excel(
         # 3. Attack Chains
         write_sheet("Attack Chains", attack_chains)
 
-        # 4. Episodes (device-centric)
+        # 4. Stacking Analysis — rarest patterns first (best FP-reduction view)
+        stacking = (
+            scenes.groupby(["TacticCategory", "DetectionType"])
+            .agg(
+                EnvDeviceCount=("DeviceName", "nunique"),
+                UniqueAccounts=("AccountName", "nunique"),
+                TotalHits=("DeviceName", "count"),
+                PrevalenceMultiplier=("PrevalenceMultiplier", "first"),
+            )
+            .reset_index()
+            .sort_values("EnvDeviceCount")
+        )
+        write_sheet("Stacking Analysis", stacking)
+
+        # 5. Episodes (device-centric)
         write_sheet("Episodes", device_episodes)
 
-        # 5. Per-tactic sheets
+        # 6. Per-tactic sheets
         for tactic in sorted(tactic_weights.keys()):
             tactic_scenes = scenes[scenes["TacticCategory"] == tactic].copy()
             tactic_scenes = tactic_scenes.sort_values("Timestamp", ascending=False)
-            # Drop internal columns before export
-            export_cols = ["Timestamp", "DeviceName", "AccountName", "DetectionType", "TacticCategory", "Evidence", "SourceFile"]
+            export_cols = ["Timestamp", "DeviceName", "AccountName", "DetectionType",
+                           "TacticCategory", "Evidence", "EnvDeviceCount",
+                           "PrevalenceMultiplier", "SourceFile"]
             tactic_scenes = tactic_scenes[[c for c in export_cols if c in tactic_scenes.columns]]
             write_sheet(tactic, tactic_scenes)
 
-        # 6. All Scenes
+        # 7. All Scenes
         all_scenes = scenes.sort_values("Timestamp", ascending=False)
-        export_cols = ["Timestamp", "DeviceName", "AccountName", "DetectionType", "TacticCategory", "Evidence", "SourceFile"]
+        export_cols = ["Timestamp", "DeviceName", "AccountName", "DetectionType",
+                       "TacticCategory", "Evidence", "EnvDeviceCount",
+                       "PrevalenceMultiplier", "SourceFile"]
         all_scenes = all_scenes[[c for c in export_cols if c in all_scenes.columns]]
         write_sheet("All Scenes", all_scenes)
 
@@ -349,6 +415,13 @@ def main():
     print(f"\n[*] Loading scenes from: {data_dir}")
     scenes = load_scenes(data_dir, tactic_weights)
     print(f"    Total scenes loaded: {len(scenes)}")
+
+    print("[*] Applying prevalence scoring...")
+    print(f"    Suppress if > {cfg.get('prevalence_suppression_threshold', 10)} devices "
+          f"(multiplier {cfg.get('prevalence_suppression_multiplier', 0.2)}x), "
+          f"boost if <= {cfg.get('prevalence_boost_threshold', 3)} devices "
+          f"(multiplier {cfg.get('prevalence_boost_multiplier', 1.5)}x)")
+    scenes = apply_prevalence_scoring(scenes, cfg)
 
     print("\n[*] Clustering scenes into episodes (device-centric)...")
     scenes_dev = assign_episodes(scenes, episode_window, "DeviceName")

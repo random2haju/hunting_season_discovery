@@ -2,8 +2,13 @@
 // Registry Run Key Modifications (Persistence)
 // TacticCategory: Persistence
 // Source: DeviceRegistryEvents
+//
+// FP Reduction: prevalence + first-seen baselining
 // ============================================================
-let lookback = 30d;
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+
 let run_key_paths = dynamic([
     "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
     "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
@@ -12,36 +17,46 @@ let run_key_paths = dynamic([
     "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnceEx",
     "HKEY_LOCAL_MACHINE\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run",
     "HKEY_CURRENT_USER\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run",
-    // Winlogon hijack
     "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
-    // Shell / UserInit override
     "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\\Shell",
     "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\\Userinit"
 ]);
-DeviceRegistryEvents
-| where Timestamp > ago(lookback)
-| where ActionType in ("RegistryValueSet", "RegistryKeyCreated")
-| where RegistryKey has_any (run_key_paths)
-// Flag values pointing to suspicious locations or commands
-| where RegistryValueData has_any (
-    "\\AppData\\", "\\Temp\\", "\\Public\\", "\\ProgramData\\",
-    "powershell", "cmd.exe", "wscript", "cscript", "mshta", "rundll32",
-    "certutil", "regsvr32", "http", "ftp", "\\\\", "base64", "bypass", "hidden"
-)
-// Exclude known software updaters — add to exclusion list as needed
-// | where InitiatingProcessFileName !in~ ("setup.exe", "installer.exe")
-| extend AccountName = InitiatingProcessAccountName
-| extend Evidence = strcat(
-    "RegKey: ", RegistryKey,
-    " | ValueName: ", RegistryValueName,
-    " | Value: ", RegistryValueData,
-    " | SetBy: ", InitiatingProcessFileName
-)
-| project
-    Timestamp,
-    DeviceName,
-    AccountName,
-    DetectionType = "Run Key Modified",
-    TacticCategory = "Persistence",
-    Evidence
+
+let all_suspicious = materialize(
+    DeviceRegistryEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType in ("RegistryValueSet", "RegistryKeyCreated")
+    | where RegistryKey has_any (run_key_paths)
+    | where RegistryValueData has_any (
+        "\\AppData\\", "\\Temp\\", "\\Public\\", "\\ProgramData\\",
+        "powershell", "cmd.exe", "wscript", "cscript", "mshta", "rundll32",
+        "certutil", "regsvr32", "http", "ftp", "\\\\", "base64", "bypass", "hidden"
+    )
+    // Exclude known software updaters — add to exclusion list as needed
+    // | where InitiatingProcessFileName !in~ ("setup.exe", "installer.exe")
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "RegKey: ", RegistryKey,
+        " | ValueName: ", RegistryValueName,
+        " | Value: ", RegistryValueData,
+        " | SetBy: ", InitiatingProcessFileName
+    )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType = "Run Key Modified",
+        TacticCategory = "Persistence",
+        Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
 | sort by Timestamp desc

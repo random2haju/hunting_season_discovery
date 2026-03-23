@@ -6,5 +6,9 @@
     "Persistence": 5,
     "Discovery": 3
   },
-  "episode_window_hours": 4
+  "episode_window_hours": 4,
+  "prevalence_suppression_threshold": 10,
+  "prevalence_boost_threshold": 3,
+  "prevalence_suppression_multiplier": 0.2,
+  "prevalence_boost_multiplier": 1.5
 }

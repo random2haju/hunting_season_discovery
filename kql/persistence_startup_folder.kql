@@ -2,8 +2,13 @@
 // Startup Folder Persistence
 // TacticCategory: Persistence
 // Source: DeviceFileEvents
+//
+// FP Reduction: prevalence + first-seen baselining
 // ============================================================
-let lookback = 30d;
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+
 let startup_paths = dynamic([
     "\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\",
     "\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\StartUp\\",
@@ -13,25 +18,38 @@ let suspicious_extensions = dynamic([
     ".exe", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".jse", ".wsf",
     ".hta", ".lnk", ".url", ".scf", ".pif"
 ]);
-DeviceFileEvents
-| where Timestamp > ago(lookback)
-| where ActionType in ("FileCreated", "FileModified", "FileRenamed")
-| where FolderPath has_any (startup_paths)
-| where FileName has_any (suspicious_extensions)
-// Exclude known installers dropping legitimate startup entries
-// | where InitiatingProcessFileName !in~ ("setup.exe", "installer.exe")
-| extend AccountName = InitiatingProcessAccountName
-| extend Evidence = strcat(
-    "StartupFile: ", FolderPath, "\\", FileName,
-    " | Action: ", ActionType,
-    " | DroppedBy: ", InitiatingProcessFileName,
-    " | DroppedByCmdLine: ", InitiatingProcessCommandLine
-)
-| project
-    Timestamp,
-    DeviceName,
-    AccountName,
-    DetectionType = "Startup Folder Drop",
-    TacticCategory = "Persistence",
-    Evidence
+
+let all_suspicious = materialize(
+    DeviceFileEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType in ("FileCreated", "FileModified", "FileRenamed")
+    | where FolderPath has_any (startup_paths)
+    | where FileName has_any (suspicious_extensions)
+    // Exclude known installers dropping legitimate startup entries
+    // | where InitiatingProcessFileName !in~ ("setup.exe", "installer.exe")
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "StartupFile: ", FolderPath, "\\", FileName,
+        " | Action: ", ActionType,
+        " | DroppedBy: ", InitiatingProcessFileName,
+        " | DroppedByCmdLine: ", InitiatingProcessCommandLine
+    )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType = "Startup Folder Drop",
+        TacticCategory = "Persistence",
+        Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
 | sort by Timestamp desc

@@ -6,86 +6,84 @@
 // Split into two tiers:
 //   Tier 1 — any execution of these tools is interesting
 //   Tier 2 — common tools flagged only on specific recon args
+//
+// FP Reduction: prevalence + first-seen baselining
 // ============================================================
-let lookback = 30d;
-DeviceProcessEvents
-| where Timestamp > ago(lookback)
-| where
-    // -------------------------------------------------------
-    // Tier 1: any execution is worth reviewing
-    // -------------------------------------------------------
-    // Domain trust / DC enumeration
-    FileName =~ "nltest.exe"
-    // Identity context — attackers almost always run this first
-    or FileName =~ "whoami.exe"
-    // Full system profile dump
-    or FileName =~ "systeminfo.exe"
-    // Logged-on user enumeration
-    or FileName =~ "quser.exe"
-    // AD object queries
-    or FileName in~ ("dsquery.exe", "dsget.exe")
-    // -------------------------------------------------------
-    // Tier 2: common tools, specific recon-flavoured arguments
-    // -------------------------------------------------------
-    // net/net1: domain user, group, share, session enumeration
-    or (FileName in~ ("net.exe", "net1.exe") and ProcessCommandLine has_any (
-        "user /domain", "group /domain", "localgroup",
-        "view", "session", "share", "accounts /domain",
-        "use \\\\", "/domain"
-    ))
-    // wmic: remote queries and sensitive object access
-    or (FileName =~ "wmic.exe" and ProcessCommandLine has_any (
-        "/node:", "process call create",
-        "shadowcopy delete", "useraccount",
-        "computersystem get", "nicconfig", "share get",
-        "startup", "logicaldisk", "os get", "qfe", "product get"
-    ))
-    // nslookup: TXT record lookups (DNS-based C2/exfil indicator)
-    or (FileName =~ "nslookup.exe" and ProcessCommandLine has_any (
-        "-type=txt", "-type=TXT", "type=txt", "-q=txt", "TXT"
-    ))
-    // sc.exe: service enumeration and remote service access
-    or (FileName =~ "sc.exe" and ProcessCommandLine has_any (
-        "query type= driver", "query type=driver",
-        "qc ", "create ", "config ", "sdshow", "sdset", "\\\\"
-    ))
-    // reg.exe: sensitive hive reads (SAM/SECURITY/SYSTEM = cred material)
-    or (FileName =~ "reg.exe" and ProcessCommandLine has_any (
-        "save HKLM\\SAM", "save HKLM\\SECURITY", "save HKLM\\SYSTEM",
-        "export HKLM\\SAM", "export HKLM\\SECURITY",
-        "query HKLM\\SAM", "query HKCU\\Software\\Microsoft\\Terminal Server"
-    ))
-    // tasklist: remote or verbose/service listing
-    or (FileName =~ "tasklist.exe" and ProcessCommandLine has_any (
-        "/s ", "/v", "/svc"
-    ))
-    // netstat: full connection + PID dump (network situational awareness)
-    or (FileName =~ "netstat.exe" and ProcessCommandLine has_any (
-        "-ano", "-anob", "/ano", "-an"
-    ))
-    // gpresult: applied policy and group membership dump
-    or (FileName =~ "gpresult.exe" and ProcessCommandLine has_any (
-        "/z", "/v", "/scope", "/r"
-    ))
-    // arp: full table dump (subnet mapping)
-    or (FileName =~ "arp.exe" and ProcessCommandLine has "-a")
-    // nbtstat: NetBIOS host/session enumeration
-    or (FileName =~ "nbtstat.exe" and ProcessCommandLine has_any (
-        "-a ", "-A ", "-n", "-r"
-    ))
-// Exclude known admin/IT tooling accounts if needed — add exclusions below
-// | where AccountName !in~ ("svc_monitoring", "it_admin")
-| extend AccountName = InitiatingProcessAccountName
-| extend Evidence = strcat(
-    "Process: ", FileName,
-    " | Parent: ", InitiatingProcessFileName,
-    " | CmdLine: ", ProcessCommandLine
-)
-| project
-    Timestamp,
-    DeviceName,
-    AccountName,
-    DetectionType = "Discovery Command",
-    TacticCategory = "Discovery",
-    Evidence
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+
+let all_suspicious = materialize(
+    DeviceProcessEvents
+    | where Timestamp > ago(baseline_window)
+    | where
+        // Tier 1: any execution is worth reviewing
+        FileName =~ "nltest.exe"
+        or FileName =~ "whoami.exe"
+        or FileName =~ "systeminfo.exe"
+        or FileName =~ "quser.exe"
+        or FileName in~ ("dsquery.exe", "dsget.exe")
+        // Tier 2: specific recon-flavoured arguments only
+        or (FileName in~ ("net.exe", "net1.exe") and ProcessCommandLine has_any (
+            "user /domain", "group /domain", "localgroup",
+            "view", "session", "share", "accounts /domain",
+            "use \\\\", "/domain"
+        ))
+        or (FileName =~ "wmic.exe" and ProcessCommandLine has_any (
+            "/node:", "process call create",
+            "shadowcopy delete", "useraccount",
+            "computersystem get", "nicconfig", "share get",
+            "startup", "logicaldisk", "os get", "qfe", "product get"
+        ))
+        or (FileName =~ "nslookup.exe" and ProcessCommandLine has_any (
+            "-type=txt", "-type=TXT", "type=txt", "-q=txt", "TXT"
+        ))
+        or (FileName =~ "sc.exe" and ProcessCommandLine has_any (
+            "query type= driver", "query type=driver",
+            "qc ", "create ", "config ", "sdshow", "sdset", "\\\\"
+        ))
+        or (FileName =~ "reg.exe" and ProcessCommandLine has_any (
+            "save HKLM\\SAM", "save HKLM\\SECURITY", "save HKLM\\SYSTEM",
+            "export HKLM\\SAM", "export HKLM\\SECURITY",
+            "query HKLM\\SAM", "query HKCU\\Software\\Microsoft\\Terminal Server"
+        ))
+        or (FileName =~ "tasklist.exe" and ProcessCommandLine has_any (
+            "/s ", "/v", "/svc"
+        ))
+        or (FileName =~ "netstat.exe" and ProcessCommandLine has_any (
+            "-ano", "-anob", "/ano", "-an"
+        ))
+        or (FileName =~ "gpresult.exe" and ProcessCommandLine has_any (
+            "/z", "/v", "/scope", "/r"
+        ))
+        or (FileName =~ "arp.exe" and ProcessCommandLine has "-a")
+        or (FileName =~ "nbtstat.exe" and ProcessCommandLine has_any (
+            "-a ", "-A ", "-n", "-r"
+        ))
+    // Exclude known admin/IT tooling accounts if needed — add exclusions below
+    // | where AccountName !in~ ("svc_monitoring", "it_admin")
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "Process: ", FileName,
+        " | Parent: ", InitiatingProcessFileName,
+        " | CmdLine: ", ProcessCommandLine
+    )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType = "Discovery Command",
+        TacticCategory = "Discovery",
+        Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
 | sort by Timestamp desc

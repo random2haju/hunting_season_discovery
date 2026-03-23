@@ -5,156 +5,128 @@
 //
 // Each binary is matched only on command-line patterns that
 // indicate abuse — not on mere execution of the binary.
+//
+// FP Reduction:
+//   - hunt_window:          only report events within this recent period
+//   - baseline_window:      total lookback (baseline = gap before hunt_window)
+//   - prevalence_threshold: suppress patterns seen on > N devices (likely IT tooling)
+//   - First-seen:           suppress patterns this device already had in the baseline
 // ============================================================
-let lookback = 30d;
-DeviceProcessEvents
-| where Timestamp > ago(lookback)
-| where
-    // -------------------------------------------------------
-    // certutil: file download, decode/encode operations
-    // -------------------------------------------------------
-    (FileName =~ "certutil.exe" and ProcessCommandLine has_any (
-        "-decode", "-encode", "-urlcache", "-verifyctl", "-ping",
-        "http://", "https://", "ftp://", ".b64", ".enc"
-    ))
-    // -------------------------------------------------------
-    // mshta: remote URL or inline script execution
-    // -------------------------------------------------------
-    or (FileName =~ "mshta.exe" and ProcessCommandLine has_any (
-        "http://", "https://", "ftp://",
-        "javascript:", "vbscript:",
-        "\\AppData\\", "\\Temp\\", "\\ProgramData\\", "\\Public\\"
-    ))
-    // -------------------------------------------------------
-    // wscript / cscript: scripts from user-writable paths
-    // -------------------------------------------------------
-    or (FileName in~ ("wscript.exe", "cscript.exe") and ProcessCommandLine has_any (
-        "\\AppData\\", "\\Temp\\", "\\ProgramData\\", "\\Public\\",
-        "http://", "https://",
-        "//B", "//E:jscript", "//E:vbscript"
-    ))
-    // -------------------------------------------------------
-    // rundll32: non-standard DLL or inline script execution
-    // -------------------------------------------------------
-    or (FileName =~ "rundll32.exe" and ProcessCommandLine has_any (
-        "javascript:", "http://", "https://",
-        "\\AppData\\", "\\Temp\\", "\\ProgramData\\", "\\Public\\",
-        "comsvcs", "pcwrun.exe",
-        "shell32.dll,ShellExec_RunDLL",
-        "advpack.dll,LaunchINFSection",
-        "ieadvpack.dll,LaunchINFSection",
-        "setupapi.dll,InstallHinfSection",
-        "syssetup.dll,SetupInfObjectInstallAction"
-    ))
-    // -------------------------------------------------------
-    // regsvr32: Squiblydoo / remote scriptlet loading
-    // -------------------------------------------------------
-    or (FileName =~ "regsvr32.exe" and ProcessCommandLine has_any (
-        "http://", "https://", "scrobj.dll",
-        "/s /n /u /i:", "/u /i:",
-        "\\Temp\\", "\\AppData\\", "\\ProgramData\\", "\\Public\\"
-    ))
-    // -------------------------------------------------------
-    // msiexec: silent install from URL or UNC path
-    // -------------------------------------------------------
-    or (FileName =~ "msiexec.exe" and ProcessCommandLine has_any (
-        "http://", "https://", "ftp://",
-        "/q /i \\\\", "/quiet /i \\\\",
-        "\\Temp\\", "\\AppData\\", "\\ProgramData\\"
-    ))
-    // -------------------------------------------------------
-    // installutil: proxy execution from non-system paths
-    // -------------------------------------------------------
-    or (FileName =~ "installutil.exe" and ProcessCommandLine has_any (
-        "\\Temp\\", "\\AppData\\", "\\ProgramData\\", "\\Public\\", "\\Desktop\\"
-    ))
-    // -------------------------------------------------------
-    // cmstp: INF file loading with UAC bypass flags
-    // -------------------------------------------------------
-    or (FileName =~ "cmstp.exe" and ProcessCommandLine has_any (
-        "/ni /s", "/s /ni", ".inf",
-        "\\Temp\\", "\\AppData\\", "\\ProgramData\\"
-    ))
-    // -------------------------------------------------------
-    // odbcconf: DLL loading via REGSVR action
-    // -------------------------------------------------------
-    or (FileName =~ "odbcconf.exe" and ProcessCommandLine has_any (
-        "/a {REGSVR", "-f ", "REGSVR",
-        "\\Temp\\", "\\AppData\\"
-    ))
-    // -------------------------------------------------------
-    // forfiles: cmd/shell proxy execution
-    // -------------------------------------------------------
-    or (FileName =~ "forfiles.exe" and ProcessCommandLine has_any (
-        "/c cmd", "/c powershell", "/c wscript", "/c mshta",
-        "0x", "http://", "\\\\"
-    ))
-    // -------------------------------------------------------
-    // msbuild: inline task execution from non-system paths
-    // -------------------------------------------------------
-    or (FileName =~ "msbuild.exe" and ProcessCommandLine has_any (
-        "\\Temp\\", "\\AppData\\", "\\ProgramData\\", "\\Public\\",
-        "http://", "https://"
-    ))
-    // -------------------------------------------------------
-    // csc.exe: compiling payload from temp/user-writable path
-    // -------------------------------------------------------
-    or (FileName =~ "csc.exe" and ProcessCommandLine has_any (
-        "\\Temp\\", "\\AppData\\", "\\ProgramData\\",
-        "/out:\\\\", "/target:exe", "/target:library"
-    ))
-    // -------------------------------------------------------
-    // bash.exe (WSL): executing payloads or downloading tools
-    // -------------------------------------------------------
-    or (FileName =~ "bash.exe" and ProcessCommandLine has_any (
-        "-c ", "curl", "wget", "nc ", "python", "perl", "ruby",
-        "/dev/tcp", "chmod +x", "base64"
-    ))
-    // -------------------------------------------------------
-    // msdt.exe: Follina exploit (CVE-2022-30190)
-    // -------------------------------------------------------
-    or (FileName =~ "msdt.exe" and ProcessCommandLine has_any (
-        "ms-msdt:", "PCWDiagnostic", "IT_BrowseForFile", "IT_LaunchMethod"
-    ))
-    // -------------------------------------------------------
-    // presentationhost.exe: ClickOnce proxy execution
-    // -------------------------------------------------------
-    or (FileName =~ "presentationhost.exe" and ProcessCommandLine has_any (
-        "http://", "https://", "\\Temp\\", "\\AppData\\"
-    ))
-    // -------------------------------------------------------
-    // control.exe: CPL file loading from suspicious paths
-    // -------------------------------------------------------
-    or (FileName =~ "control.exe" and ProcessCommandLine has_any (
-        "\\Temp\\", "\\AppData\\", "\\Public\\", "\\ProgramData\\",
-        ".cpl", "http://", "https://"
-    ))
-    // -------------------------------------------------------
-    // ieexec.exe: download and execute via IE infrastructure
-    // -------------------------------------------------------
-    or (FileName =~ "ieexec.exe" and ProcessCommandLine has_any (
-        "http://", "https://", "ftp://"
-    ))
-    // -------------------------------------------------------
-    // pcalua.exe / scriptrunner.exe: shell proxy execution
-    // -------------------------------------------------------
-    or (FileName =~ "pcalua.exe" and ProcessCommandLine has_any (
-        "-a ", "\\Temp\\", "\\AppData\\", "http://", "https://"
-    ))
-    or (FileName =~ "scriptrunner.exe" and ProcessCommandLine has_any (
-        "-appvscript", "cmd.exe", "powershell.exe", "\\Temp\\", "\\AppData\\"
-    ))
-| extend AccountName = InitiatingProcessAccountName
-| extend Evidence = strcat(
-    "Process: ", FileName,
-    " | Parent: ", InitiatingProcessFileName,
-    " | CmdLine: ", ProcessCommandLine
-)
-| project
-    Timestamp,
-    DeviceName,
-    AccountName,
-    DetectionType = "LOLBin Execution",
-    TacticCategory = "Execution",
-    Evidence
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+
+// All suspicious LOLBin activity across the full window
+let all_suspicious = materialize(
+    DeviceProcessEvents
+    | where Timestamp > ago(baseline_window)
+    | where
+        (FileName =~ "certutil.exe" and ProcessCommandLine has_any (
+            "-decode", "-encode", "-urlcache", "-verifyctl", "-ping",
+            "http://", "https://", "ftp://", ".b64", ".enc"
+        ))
+        or (FileName =~ "mshta.exe" and ProcessCommandLine has_any (
+            "http://", "https://", "ftp://",
+            "javascript:", "vbscript:",
+            "\\AppData\\", "\\Temp\\", "\\ProgramData\\", "\\Public\\"
+        ))
+        or (FileName in~ ("wscript.exe", "cscript.exe") and ProcessCommandLine has_any (
+            "\\AppData\\", "\\Temp\\", "\\ProgramData\\", "\\Public\\",
+            "http://", "https://",
+            "//B", "//E:jscript", "//E:vbscript"
+        ))
+        or (FileName =~ "rundll32.exe" and ProcessCommandLine has_any (
+            "javascript:", "http://", "https://",
+            "\\AppData\\", "\\Temp\\", "\\ProgramData\\", "\\Public\\",
+            "comsvcs", "pcwrun.exe",
+            "shell32.dll,ShellExec_RunDLL",
+            "advpack.dll,LaunchINFSection",
+            "ieadvpack.dll,LaunchINFSection",
+            "setupapi.dll,InstallHinfSection",
+            "syssetup.dll,SetupInfObjectInstallAction"
+        ))
+        or (FileName =~ "regsvr32.exe" and ProcessCommandLine has_any (
+            "http://", "https://", "scrobj.dll",
+            "/s /n /u /i:", "/u /i:",
+            "\\Temp\\", "\\AppData\\", "\\ProgramData\\", "\\Public\\"
+        ))
+        or (FileName =~ "msiexec.exe" and ProcessCommandLine has_any (
+            "http://", "https://", "ftp://",
+            "/q /i \\\\", "/quiet /i \\\\",
+            "\\Temp\\", "\\AppData\\", "\\ProgramData\\"
+        ))
+        or (FileName =~ "installutil.exe" and ProcessCommandLine has_any (
+            "\\Temp\\", "\\AppData\\", "\\ProgramData\\", "\\Public\\", "\\Desktop\\"
+        ))
+        or (FileName =~ "cmstp.exe" and ProcessCommandLine has_any (
+            "/ni /s", "/s /ni", ".inf",
+            "\\Temp\\", "\\AppData\\", "\\ProgramData\\"
+        ))
+        or (FileName =~ "odbcconf.exe" and ProcessCommandLine has_any (
+            "/a {REGSVR", "-f ", "REGSVR",
+            "\\Temp\\", "\\AppData\\"
+        ))
+        or (FileName =~ "forfiles.exe" and ProcessCommandLine has_any (
+            "/c cmd", "/c powershell", "/c wscript", "/c mshta",
+            "0x", "http://", "\\\\"
+        ))
+        or (FileName =~ "msbuild.exe" and ProcessCommandLine has_any (
+            "\\Temp\\", "\\AppData\\", "\\ProgramData\\", "\\Public\\",
+            "http://", "https://"
+        ))
+        or (FileName =~ "csc.exe" and ProcessCommandLine has_any (
+            "\\Temp\\", "\\AppData\\", "\\ProgramData\\",
+            "/out:\\\\", "/target:exe", "/target:library"
+        ))
+        or (FileName =~ "bash.exe" and ProcessCommandLine has_any (
+            "-c ", "curl", "wget", "nc ", "python", "perl", "ruby",
+            "/dev/tcp", "chmod +x", "base64"
+        ))
+        or (FileName =~ "msdt.exe" and ProcessCommandLine has_any (
+            "ms-msdt:", "PCWDiagnostic", "IT_BrowseForFile", "IT_LaunchMethod"
+        ))
+        or (FileName =~ "presentationhost.exe" and ProcessCommandLine has_any (
+            "http://", "https://", "\\Temp\\", "\\AppData\\"
+        ))
+        or (FileName =~ "control.exe" and ProcessCommandLine has_any (
+            "\\Temp\\", "\\AppData\\", "\\Public\\", "\\ProgramData\\",
+            ".cpl", "http://", "https://"
+        ))
+        or (FileName =~ "ieexec.exe" and ProcessCommandLine has_any (
+            "http://", "https://", "ftp://"
+        ))
+        or (FileName =~ "pcalua.exe" and ProcessCommandLine has_any (
+            "-a ", "\\Temp\\", "\\AppData\\", "http://", "https://"
+        ))
+        or (FileName =~ "scriptrunner.exe" and ProcessCommandLine has_any (
+            "-appvscript", "cmd.exe", "powershell.exe", "\\Temp\\", "\\AppData\\"
+        ))
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "Process: ", FileName,
+        " | Parent: ", InitiatingProcessFileName,
+        " | CmdLine: ", ProcessCommandLine
+    )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType = "LOLBin Execution",
+        TacticCategory = "Execution",
+        Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+// Hunt period: recent events only
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+// Baseline: patterns seen on this device BEFORE the hunt window
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+// Prevalence: keep only patterns rare across the environment
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+// Output: rare in the environment AND new (not seen in baseline) per device
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
 | sort by Timestamp desc
