@@ -2,25 +2,77 @@
 // Discovery Command Execution
 // TacticCategory: Discovery
 // Source: DeviceProcessEvents
+//
+// Split into two tiers:
+//   Tier 1 — any execution of these tools is interesting
+//   Tier 2 — common tools flagged only on specific recon args
 // ============================================================
 let lookback = 30d;
-let discovery_tools = dynamic([
-    "net.exe", "net1.exe", "nltest.exe", "whoami.exe", "ipconfig.exe",
-    "systeminfo.exe", "arp.exe", "nslookup.exe", "ping.exe", "tasklist.exe",
-    "quser.exe", "query.exe", "dsquery.exe", "dsget.exe", "netstat.exe",
-    "route.exe", "hostname.exe", "wmic.exe", "sc.exe", "reg.exe",
-    "gpresult.exe", "nbtstat.exe", "tracert.exe"
-]);
-let discovery_args = dynamic([
-    "user", "group", "localgroup", "view", "share", "session", "accounts",
-    "domain", "trust", "dclist", "domain_trusts", "/domain", "enum"
-]);
 DeviceProcessEvents
 | where Timestamp > ago(lookback)
-| where FileName in~ (discovery_tools)
-// Must be doing something reconnaissance-flavoured
-| where ProcessCommandLine has_any (discovery_args)
-    or FileName in~ ("whoami.exe", "systeminfo.exe", "ipconfig.exe", "hostname.exe")
+| where
+    // -------------------------------------------------------
+    // Tier 1: any execution is worth reviewing
+    // -------------------------------------------------------
+    // Domain trust / DC enumeration
+    FileName =~ "nltest.exe"
+    // Identity context — attackers almost always run this first
+    or FileName =~ "whoami.exe"
+    // Full system profile dump
+    or FileName =~ "systeminfo.exe"
+    // Logged-on user enumeration
+    or FileName =~ "quser.exe"
+    // AD object queries
+    or FileName in~ ("dsquery.exe", "dsget.exe")
+    // -------------------------------------------------------
+    // Tier 2: common tools, specific recon-flavoured arguments
+    // -------------------------------------------------------
+    // net/net1: domain user, group, share, session enumeration
+    or (FileName in~ ("net.exe", "net1.exe") and ProcessCommandLine has_any (
+        "user /domain", "group /domain", "localgroup",
+        "view", "session", "share", "accounts /domain",
+        "use \\\\", "/domain"
+    ))
+    // wmic: remote queries and sensitive object access
+    or (FileName =~ "wmic.exe" and ProcessCommandLine has_any (
+        "/node:", "process call create",
+        "shadowcopy delete", "useraccount",
+        "computersystem get", "nicconfig", "share get",
+        "startup", "logicaldisk", "os get", "qfe", "product get"
+    ))
+    // nslookup: TXT record lookups (DNS-based C2/exfil indicator)
+    or (FileName =~ "nslookup.exe" and ProcessCommandLine has_any (
+        "-type=txt", "-type=TXT", "type=txt", "-q=txt", "TXT"
+    ))
+    // sc.exe: service enumeration and remote service access
+    or (FileName =~ "sc.exe" and ProcessCommandLine has_any (
+        "query type= driver", "query type=driver",
+        "qc ", "create ", "config ", "sdshow", "sdset", "\\\\"
+    ))
+    // reg.exe: sensitive hive reads (SAM/SECURITY/SYSTEM = cred material)
+    or (FileName =~ "reg.exe" and ProcessCommandLine has_any (
+        "save HKLM\\SAM", "save HKLM\\SECURITY", "save HKLM\\SYSTEM",
+        "export HKLM\\SAM", "export HKLM\\SECURITY",
+        "query HKLM\\SAM", "query HKCU\\Software\\Microsoft\\Terminal Server"
+    ))
+    // tasklist: remote or verbose/service listing
+    or (FileName =~ "tasklist.exe" and ProcessCommandLine has_any (
+        "/s ", "/v", "/svc"
+    ))
+    // netstat: full connection + PID dump (network situational awareness)
+    or (FileName =~ "netstat.exe" and ProcessCommandLine has_any (
+        "-ano", "-anob", "/ano", "-an"
+    ))
+    // gpresult: applied policy and group membership dump
+    or (FileName =~ "gpresult.exe" and ProcessCommandLine has_any (
+        "/z", "/v", "/scope", "/r"
+    ))
+    // arp: full table dump (subnet mapping)
+    or (FileName =~ "arp.exe" and ProcessCommandLine has "-a")
+    // nbtstat: NetBIOS host/session enumeration
+    or (FileName =~ "nbtstat.exe" and ProcessCommandLine has_any (
+        "-a ", "-A ", "-n", "-r"
+    ))
 // Exclude known admin/IT tooling accounts if needed — add exclusions below
 // | where AccountName !in~ ("svc_monitoring", "it_admin")
 | extend AccountName = InitiatingProcessAccountName

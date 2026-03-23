@@ -2,22 +2,148 @@
 // LOLBin Execution Detection
 // TacticCategory: Execution
 // Source: DeviceProcessEvents
+//
+// Each binary is matched only on command-line patterns that
+// indicate abuse — not on mere execution of the binary.
 // ============================================================
 let lookback = 30d;
-let lolbins = dynamic([
-    "certutil.exe", "mshta.exe", "wscript.exe", "cscript.exe",
-    "rundll32.exe", "regsvr32.exe", "msiexec.exe", "installutil.exe",
-    "cmstp.exe", "odbcconf.exe", "ieexec.exe", "forfiles.exe",
-    "bash.exe", "scriptrunner.exe", "pcalua.exe", "syncappvpublishingserver.exe",
-    "appsyncpublishingserver.exe", "control.exe", "csc.exe", "msbuild.exe",
-    "msdt.exe", "presentationhost.exe"
-]);
 DeviceProcessEvents
 | where Timestamp > ago(lookback)
-| where FileName in~ (lolbins)
-// Exclude common benign parent processes
-| where InitiatingProcessFileName !in~ ("msiexec.exe", "explorer.exe", "svchost.exe")
-    or ProcessCommandLine has_any ("http", "ftp", "\\\\", "base64", "decode", "download", "invoke", "iex", "bypass", "hidden", "encode")
+| where
+    // -------------------------------------------------------
+    // certutil: file download, decode/encode operations
+    // -------------------------------------------------------
+    (FileName =~ "certutil.exe" and ProcessCommandLine has_any (
+        "-decode", "-encode", "-urlcache", "-verifyctl", "-ping",
+        "http://", "https://", "ftp://", ".b64", ".enc"
+    ))
+    // -------------------------------------------------------
+    // mshta: remote URL or inline script execution
+    // -------------------------------------------------------
+    or (FileName =~ "mshta.exe" and ProcessCommandLine has_any (
+        "http://", "https://", "ftp://",
+        "javascript:", "vbscript:",
+        "\\AppData\\", "\\Temp\\", "\\ProgramData\\", "\\Public\\"
+    ))
+    // -------------------------------------------------------
+    // wscript / cscript: scripts from user-writable paths
+    // -------------------------------------------------------
+    or (FileName in~ ("wscript.exe", "cscript.exe") and ProcessCommandLine has_any (
+        "\\AppData\\", "\\Temp\\", "\\ProgramData\\", "\\Public\\",
+        "http://", "https://",
+        "//B", "//E:jscript", "//E:vbscript"
+    ))
+    // -------------------------------------------------------
+    // rundll32: non-standard DLL or inline script execution
+    // -------------------------------------------------------
+    or (FileName =~ "rundll32.exe" and ProcessCommandLine has_any (
+        "javascript:", "http://", "https://",
+        "\\AppData\\", "\\Temp\\", "\\ProgramData\\", "\\Public\\",
+        "comsvcs", "pcwrun.exe",
+        "shell32.dll,ShellExec_RunDLL",
+        "advpack.dll,LaunchINFSection",
+        "ieadvpack.dll,LaunchINFSection",
+        "setupapi.dll,InstallHinfSection",
+        "syssetup.dll,SetupInfObjectInstallAction"
+    ))
+    // -------------------------------------------------------
+    // regsvr32: Squiblydoo / remote scriptlet loading
+    // -------------------------------------------------------
+    or (FileName =~ "regsvr32.exe" and ProcessCommandLine has_any (
+        "http://", "https://", "scrobj.dll",
+        "/s /n /u /i:", "/u /i:",
+        "\\Temp\\", "\\AppData\\", "\\ProgramData\\", "\\Public\\"
+    ))
+    // -------------------------------------------------------
+    // msiexec: silent install from URL or UNC path
+    // -------------------------------------------------------
+    or (FileName =~ "msiexec.exe" and ProcessCommandLine has_any (
+        "http://", "https://", "ftp://",
+        "/q /i \\\\", "/quiet /i \\\\",
+        "\\Temp\\", "\\AppData\\", "\\ProgramData\\"
+    ))
+    // -------------------------------------------------------
+    // installutil: proxy execution from non-system paths
+    // -------------------------------------------------------
+    or (FileName =~ "installutil.exe" and ProcessCommandLine has_any (
+        "\\Temp\\", "\\AppData\\", "\\ProgramData\\", "\\Public\\", "\\Desktop\\"
+    ))
+    // -------------------------------------------------------
+    // cmstp: INF file loading with UAC bypass flags
+    // -------------------------------------------------------
+    or (FileName =~ "cmstp.exe" and ProcessCommandLine has_any (
+        "/ni /s", "/s /ni", ".inf",
+        "\\Temp\\", "\\AppData\\", "\\ProgramData\\"
+    ))
+    // -------------------------------------------------------
+    // odbcconf: DLL loading via REGSVR action
+    // -------------------------------------------------------
+    or (FileName =~ "odbcconf.exe" and ProcessCommandLine has_any (
+        "/a {REGSVR", "-f ", "REGSVR",
+        "\\Temp\\", "\\AppData\\"
+    ))
+    // -------------------------------------------------------
+    // forfiles: cmd/shell proxy execution
+    // -------------------------------------------------------
+    or (FileName =~ "forfiles.exe" and ProcessCommandLine has_any (
+        "/c cmd", "/c powershell", "/c wscript", "/c mshta",
+        "0x", "http://", "\\\\"
+    ))
+    // -------------------------------------------------------
+    // msbuild: inline task execution from non-system paths
+    // -------------------------------------------------------
+    or (FileName =~ "msbuild.exe" and ProcessCommandLine has_any (
+        "\\Temp\\", "\\AppData\\", "\\ProgramData\\", "\\Public\\",
+        "http://", "https://"
+    ))
+    // -------------------------------------------------------
+    // csc.exe: compiling payload from temp/user-writable path
+    // -------------------------------------------------------
+    or (FileName =~ "csc.exe" and ProcessCommandLine has_any (
+        "\\Temp\\", "\\AppData\\", "\\ProgramData\\",
+        "/out:\\\\", "/target:exe", "/target:library"
+    ))
+    // -------------------------------------------------------
+    // bash.exe (WSL): executing payloads or downloading tools
+    // -------------------------------------------------------
+    or (FileName =~ "bash.exe" and ProcessCommandLine has_any (
+        "-c ", "curl", "wget", "nc ", "python", "perl", "ruby",
+        "/dev/tcp", "chmod +x", "base64"
+    ))
+    // -------------------------------------------------------
+    // msdt.exe: Follina exploit (CVE-2022-30190)
+    // -------------------------------------------------------
+    or (FileName =~ "msdt.exe" and ProcessCommandLine has_any (
+        "ms-msdt:", "PCWDiagnostic", "IT_BrowseForFile", "IT_LaunchMethod"
+    ))
+    // -------------------------------------------------------
+    // presentationhost.exe: ClickOnce proxy execution
+    // -------------------------------------------------------
+    or (FileName =~ "presentationhost.exe" and ProcessCommandLine has_any (
+        "http://", "https://", "\\Temp\\", "\\AppData\\"
+    ))
+    // -------------------------------------------------------
+    // control.exe: CPL file loading from suspicious paths
+    // -------------------------------------------------------
+    or (FileName =~ "control.exe" and ProcessCommandLine has_any (
+        "\\Temp\\", "\\AppData\\", "\\Public\\", "\\ProgramData\\",
+        ".cpl", "http://", "https://"
+    ))
+    // -------------------------------------------------------
+    // ieexec.exe: download and execute via IE infrastructure
+    // -------------------------------------------------------
+    or (FileName =~ "ieexec.exe" and ProcessCommandLine has_any (
+        "http://", "https://", "ftp://"
+    ))
+    // -------------------------------------------------------
+    // pcalua.exe / scriptrunner.exe: shell proxy execution
+    // -------------------------------------------------------
+    or (FileName =~ "pcalua.exe" and ProcessCommandLine has_any (
+        "-a ", "\\Temp\\", "\\AppData\\", "http://", "https://"
+    ))
+    or (FileName =~ "scriptrunner.exe" and ProcessCommandLine has_any (
+        "-appvscript", "cmd.exe", "powershell.exe", "\\Temp\\", "\\AppData\\"
+    ))
 | extend AccountName = InitiatingProcessAccountName
 | extend Evidence = strcat(
     "Process: ", FileName,
