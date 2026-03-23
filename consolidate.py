@@ -248,10 +248,13 @@ def build_attack_chains(device_seasons: pd.DataFrame, scenes: pd.DataFrame) -> p
 def auto_width(worksheet, df: pd.DataFrame, max_width: int = 80):
     """Set column widths based on content."""
     for i, col in enumerate(df.columns):
-        max_len = max(
-            df[col].astype(str).map(len).max() if len(df) > 0 else 0,
-            len(str(col))
-        )
+        if len(df) > 0:
+            # .str.len() handles NaN safely (returns NaN for them, not a TypeError)
+            max_data_len = df[col].astype(str).str.len().max()
+            max_data_len = int(max_data_len) if pd.notna(max_data_len) else 0
+        else:
+            max_data_len = 0
+        max_len = max(max_data_len, len(str(col)))
         worksheet.set_column(i, i, min(max_len + 2, max_width))
 
 
