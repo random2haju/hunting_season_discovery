@@ -36,7 +36,7 @@ def load_config(path: str) -> dict:
     return cfg
 
 
-def load_scenes(data_dir: str, tactic_weights: dict) -> pd.DataFrame:
+def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
     """Load all CSV files from data_dir into a single scenes DataFrame."""
     frames = []
     for fname in sorted(os.listdir(data_dir)):
@@ -77,6 +77,15 @@ def load_scenes(data_dir: str, tactic_weights: dict) -> pd.DataFrame:
     scenes["Timestamp"] = pd.to_datetime(scenes["Timestamp"], utc=True, errors="coerce")
     scenes = scenes.dropna(subset=["Timestamp"])
     scenes["ScoreContribution"] = scenes["TacticCategory"].map(tactic_weights).fillna(1).astype(int)
+
+    # For rows that carry a Severity column (MDE alerts), override ScoreContribution
+    if "Severity" in scenes.columns:
+        sev_map = cfg.get("alert_severity_weights", {})
+        mask = scenes["Severity"].notna() & scenes["Severity"].ne("")
+        scenes.loc[mask, "ScoreContribution"] = (
+            scenes.loc[mask, "Severity"].map(sev_map).fillna(1).astype(int)
+        )
+
     scenes["DeviceName"] = scenes["DeviceName"].str.strip().str.lower()
     scenes["AccountName"] = scenes["AccountName"].str.strip().str.lower()
     return scenes
@@ -432,7 +441,7 @@ def main():
     print(f"    Episode window: {episode_window}h")
 
     print(f"\n[*] Loading scenes from: {data_dir}")
-    scenes = load_scenes(data_dir, tactic_weights)
+    scenes = load_scenes(data_dir, tactic_weights, cfg)
     print(f"    Total scenes loaded: {len(scenes)}")
 
     print("[*] Applying prevalence scoring...")

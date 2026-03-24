@@ -10,5 +10,11 @@
   "prevalence_suppression_threshold": 10,
   "prevalence_boost_threshold": 3,
   "prevalence_suppression_multiplier": 0.2,
-  "prevalence_boost_multiplier": 1.5
+  "prevalence_boost_multiplier": 1.5,
+  "alert_severity_weights": {
+    "High": 10,
+    "Medium": 6,
+    "Low": 3,
+    "Informational": 1
+  }
 }
