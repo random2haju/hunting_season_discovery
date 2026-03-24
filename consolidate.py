@@ -318,6 +318,7 @@ def write_excel(
     user_seasons: pd.DataFrame,
     attack_chains: pd.DataFrame,
     tactic_weights: dict,
+    cfg: dict,
 ):
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
         wb = writer.book
@@ -361,11 +362,24 @@ def write_excel(
                 EnvDeviceCount=("DeviceName", "nunique"),
                 UniqueAccounts=("AccountName", "nunique"),
                 TotalHits=("DeviceName", "count"),
-                PrevalenceMultiplier=("PrevalenceMultiplier", "first"),
             )
             .reset_index()
             .sort_values("EnvDeviceCount")
         )
+        supp_threshold = cfg.get("prevalence_suppression_threshold", 10)
+        boost_threshold = cfg.get("prevalence_boost_threshold", 3)
+        supp_mult  = cfg.get("prevalence_suppression_multiplier", 0.2)
+        boost_mult = cfg.get("prevalence_boost_multiplier", 1.5)
+
+        def _stack_mult(row):
+            combined = max(row["EnvDeviceCount"], row["UniqueAccounts"])
+            if combined > supp_threshold:
+                return supp_mult
+            if combined <= boost_threshold:
+                return boost_mult
+            return 1.0
+
+        stacking["PrevalenceMultiplier"] = stacking.apply(_stack_mult, axis=1)
         write_sheet("Stacking Analysis", stacking)
 
         # 5. Episodes (device-centric)
@@ -452,7 +466,7 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = os.path.join(out_dir, f"threat_hunt_{timestamp}.xlsx")
     print(f"\n[*] Writing Excel workbook...")
-    write_excel(output_path, scenes, device_episodes, device_seasons, user_seasons, attack_chains, tactic_weights)
+    write_excel(output_path, scenes, device_episodes, device_seasons, user_seasons, attack_chains, tactic_weights, cfg)
 
     # Summary to console
     print("\n" + "="*60)

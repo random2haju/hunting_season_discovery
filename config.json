@@ -2,7 +2,7 @@
   "tactic_weights": {
     "CredentialAccess": 10,
     "LateralMovement": 8,
-    "Execution": 6,
+    "Execution": 2,
     "Persistence": 5,
     "Discovery": 3
   },
