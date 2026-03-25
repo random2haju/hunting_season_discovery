@@ -338,6 +338,17 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
     )
 
     seasons = ep_summary.join(tactic_scores, how="left").fillna(0)
+
+    # Behavioral diversity: unique normalized evidence patterns and detection methods per entity
+    ev_col = "EvidenceNormalized" if "EvidenceNormalized" in scenes.columns else "Evidence"
+    diversity = scenes.groupby(entity_col).agg(
+        UniqueEvidenceCount=(ev_col, "nunique"),
+        UniqueDetectionTypes=("DetectionType", "nunique"),
+    )
+    seasons = seasons.join(diversity, how="left").fillna(0)
+    seasons["UniqueEvidenceCount"] = seasons["UniqueEvidenceCount"].astype(int)
+    seasons["UniqueDetectionTypes"] = seasons["UniqueDetectionTypes"].astype(int)
+
     seasons["TotalRisk"] = seasons["TotalRisk"].astype(int)
     seasons = seasons.sort_values("TotalRisk", ascending=False).reset_index()
     return seasons
@@ -599,6 +610,12 @@ def main():
     print("="*60)
     top = device_seasons.head(10)[["DeviceName", "EpisodeCount", "TotalRisk", "TotalScenes"]]
     print(top.to_string(index=False))
+
+    print("\n" + "="*60)
+    print("TOP DEVICES BY BEHAVIORAL DIVERSITY")
+    print("="*60)
+    top_div = device_seasons.sort_values("UniqueEvidenceCount", ascending=False).head(10)
+    print(top_div[["DeviceName", "UniqueEvidenceCount", "UniqueDetectionTypes", "TotalRisk"]].to_string(index=False))
 
     if not attack_chains.empty:
         print("\n" + "="*60)
