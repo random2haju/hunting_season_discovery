@@ -66,6 +66,7 @@ New tactic categories not already in `config.json` will score as 1 and log a war
 | `evidence_normalizations` | List of `{pattern, replacement}` regex pairs applied to Evidence before prevalence grouping |
 | `use_evidence_clustering` | Enable Drain3 auto-clustering of Evidence strings into templates (default false) |
 | `evidence_clustering_sim_threshold` | Drain3 similarity threshold 0–1 (default 0.5); higher = less aggressive clustering |
+| `detection_type_multipliers` | Optional per-DetectionType score multiplier applied on top of tactic weights and severity |
 
 ## What stays out of git
 

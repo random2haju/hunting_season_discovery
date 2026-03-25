@@ -75,7 +75,11 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
 
     scenes = pd.concat(frames, ignore_index=True)
     scenes["Timestamp"] = pd.to_datetime(scenes["Timestamp"], utc=True, errors="coerce")
+    n_before = len(scenes)
     scenes = scenes.dropna(subset=["Timestamp"])
+    dropped = n_before - len(scenes)
+    if dropped:
+        print(f"  [WARN] Dropped {dropped} row(s) with unparseable timestamps")
     scenes["ScoreContribution"] = scenes["TacticCategory"].map(tactic_weights).fillna(1).astype(int)
 
     # For rows that carry a Severity column (MDE alerts), override ScoreContribution
@@ -85,6 +89,14 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
         scenes.loc[mask, "ScoreContribution"] = (
             scenes.loc[mask, "Severity"].map(sev_map).fillna(1).astype(int)
         )
+
+    # Optional per-DetectionType multipliers — fine-grained tuning on top of tactic weights
+    dt_mult = cfg.get("detection_type_multipliers", {})
+    if dt_mult:
+        scenes["ScoreContribution"] = (
+            scenes["ScoreContribution"]
+            * scenes["DetectionType"].map(dt_mult).fillna(1.0)
+        ).round(1)
 
     scenes["DeviceName"] = scenes["DeviceName"].str.strip().str.lower()
     scenes["AccountName"] = scenes["AccountName"].str.strip().str.lower()
@@ -351,6 +363,13 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
 
     seasons["TotalRisk"] = seasons["TotalRisk"].astype(int)
     seasons = seasons.sort_values("TotalRisk", ascending=False).reset_index()
+    # Percentile rank so analysts have immediate context for raw scores
+    if len(seasons) > 1:
+        seasons["RiskPercentile"] = (
+            seasons["TotalRisk"].rank(pct=True, ascending=True) * 100
+        ).round(0).astype(int)
+    else:
+        seasons["RiskPercentile"] = 100
     return seasons
 
 
@@ -379,10 +398,14 @@ def build_attack_chains(device_seasons: pd.DataFrame, scenes: pd.DataFrame) -> p
     parent = {}
 
     def find(x):
-        while parent.get(x, x) != x:
-            parent[x] = parent.get(parent.get(x, x), parent.get(x, x))
-            x = parent.get(x, x)
-        return x
+        # Pass 1: walk to root
+        root = x
+        while parent.get(root, root) != root:
+            root = parent[root]
+        # Pass 2: path compression — point every node on the path directly to root
+        while parent.get(x, x) != root:
+            parent[x], x = root, parent[x]
+        return root
 
     def union(a, b):
         ra, rb = find(a), find(b)
