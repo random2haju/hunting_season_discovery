@@ -97,50 +97,106 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
 
 def apply_prevalence_scoring(scenes: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     """
-    Adjust ScoreContribution based on how many devices showed each DetectionType.
+    Adjust ScoreContribution based on prevalence — but with two distinct models:
 
-    Rare detections (few devices) get a score boost — they are more likely to be
-    genuine attacker activity. Widespread detections (many devices) get suppressed
-    — they are likely IT tooling or benign software that slipped through KQL filters.
+    Behavioral detections (no Severity column):
+        Environment-wide device count per EvidenceNormalized pattern.
+        Rare patterns (few devices) get a boost; widespread patterns get suppressed
+        — widespread = likely IT tooling or benign software.
 
-    Thresholds and multipliers are read from config.json.
+    MDE native alerts (non-empty Severity column):
+        Never suppressed — AV/EDR detections are curated threat intel, not noise.
+        Instead, boosted when the same alert fires multiple times on the same device
+        (per-device frequency >= mde_alert_frequency_boost_threshold).
+
+    Evidence normalization (applied to both paths before grouping):
+        evidence_normalizations in config.json is a list of {pattern, replacement}
+        regex pairs applied in sequence to create EvidenceNormalized. This collapses
+        user-specific path segments (e.g. C:\\Users\\alice\\ → C:\\Users\\<user>\\)
+        so the same command run by different users is counted as one pattern.
+        Original Evidence is preserved for display.
     """
     supp_threshold = cfg.get("prevalence_suppression_threshold", 10)
     boost_threshold = cfg.get("prevalence_boost_threshold", 3)
     supp_mult  = cfg.get("prevalence_suppression_multiplier", 0.2)
     boost_mult = cfg.get("prevalence_boost_multiplier", 1.5)
+    mde_freq_threshold = cfg.get("mde_alert_frequency_boost_threshold", 2)
+    mde_freq_boost = cfg.get("mde_alert_frequency_boost_multiplier", 1.5)
 
-    # Count unique devices per Evidence pattern (exact command/key match)
-    # — mirrors the KQL prevalence key so "LOLBin Execution" on 11 devices
-    #   doesn't suppress a unique certutil command seen only on 1 device.
-    env_counts = (
-        scenes.groupby("Evidence")["DeviceName"]
-        .nunique()
-        .rename("EnvDeviceCount")
-        .reset_index()
-    )
-    scenes = scenes.merge(env_counts, on="Evidence", how="left")
+    # --- Evidence normalization (applies to all rows) ---
+    normalizations = cfg.get("evidence_normalizations", [])
+    scenes["EvidenceNormalized"] = scenes["Evidence"].astype(str)
+    for norm in normalizations:
+        scenes["EvidenceNormalized"] = scenes["EvidenceNormalized"].str.replace(
+            norm["pattern"], norm["replacement"], regex=True
+        )
 
-    def _multiplier(count):
-        if count > supp_threshold:
-            return supp_mult
-        if count <= boost_threshold:
-            return boost_mult
-        return 1.0
+    # --- Split into behavioral and MDE alert rows ---
+    if "Severity" in scenes.columns:
+        is_mde = scenes["Severity"].notna() & scenes["Severity"].ne("")
+    else:
+        is_mde = pd.Series(False, index=scenes.index)
 
-    scenes["PrevalenceMultiplier"] = scenes["EnvDeviceCount"].apply(_multiplier)
-    scenes["ScoreContribution"] = (
-        scenes["ScoreContribution"] * scenes["PrevalenceMultiplier"]
-    ).round(1)
+    behavioral = scenes[~is_mde].copy()
+    mde = scenes[is_mde].copy()
 
-    # Log any suppressed evidence patterns
-    suppressed = env_counts[env_counts["EnvDeviceCount"] > supp_threshold]
-    for _, row in suppressed.iterrows():
-        preview = str(row["Evidence"])[:80]
-        print(f"  [PREVALENCE] Pattern seen on {row['EnvDeviceCount']} devices "
-              f"— score multiplier {supp_mult}x: {preview}...")
+    # --- Behavioral path: env-wide suppression/boost ---
+    if not behavioral.empty:
+        env_counts = (
+            behavioral.groupby("EvidenceNormalized")["DeviceName"]
+            .nunique()
+            .rename("EnvDeviceCount")
+            .reset_index()
+        )
+        behavioral = behavioral.merge(env_counts, on="EvidenceNormalized", how="left")
 
-    return scenes
+        def _multiplier(count):
+            if count > supp_threshold:
+                return supp_mult
+            if count <= boost_threshold:
+                return boost_mult
+            return 1.0
+
+        behavioral["PrevalenceMultiplier"] = behavioral["EnvDeviceCount"].apply(_multiplier)
+        behavioral["ScoreContribution"] = (
+            behavioral["ScoreContribution"] * behavioral["PrevalenceMultiplier"]
+        ).round(1)
+        behavioral["DeviceAlertCount"] = float("nan")
+
+        suppressed = env_counts[env_counts["EnvDeviceCount"] > supp_threshold]
+        for _, row in suppressed.iterrows():
+            preview = str(row["EvidenceNormalized"])[:80]
+            print(f"  [PREVALENCE] Pattern seen on {row['EnvDeviceCount']} devices "
+                  f"— score multiplier {supp_mult}x: {preview}...")
+
+    # --- MDE alert path: per-device frequency boost, no suppression ---
+    if not mde.empty:
+        # EnvDeviceCount for analyst visibility only — never drives suppression
+        env_counts_mde = (
+            mde.groupby("EvidenceNormalized")["DeviceName"]
+            .nunique()
+            .rename("EnvDeviceCount")
+            .reset_index()
+        )
+        mde = mde.merge(env_counts_mde, on="EvidenceNormalized", how="left")
+
+        # Per-device frequency: how many times did this alert fire on this device?
+        device_counts = (
+            mde.groupby(["DeviceName", "EvidenceNormalized"])
+            .size()
+            .rename("DeviceAlertCount")
+            .reset_index()
+        )
+        mde = mde.merge(device_counts, on=["DeviceName", "EvidenceNormalized"], how="left")
+
+        mde["PrevalenceMultiplier"] = mde["DeviceAlertCount"].apply(
+            lambda c: mde_freq_boost if c >= mde_freq_threshold else 1.0
+        )
+        mde["ScoreContribution"] = (
+            mde["ScoreContribution"] * mde["PrevalenceMultiplier"]
+        ).round(1)
+
+    return pd.concat([behavioral, mde], ignore_index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -488,7 +544,13 @@ def main():
         print("\n" + "="*60)
         print("ATTACK CHAINS DETECTED")
         print("="*60)
-        print(attack_chains[["ChainID", "Devices", "PivotAccounts", "ChainRiskScore"]].to_string(index=False))
+        display = attack_chains[["ChainID", "Devices", "PivotAccounts", "ChainRiskScore"]].copy()
+        for col in ("Devices", "PivotAccounts"):
+            display[col] = display[col].where(
+                display[col].str.len() <= 60,
+                display[col].str[:57] + "..."
+            )
+        print(display.to_string(index=False))
 
     print("\nDone.")
 

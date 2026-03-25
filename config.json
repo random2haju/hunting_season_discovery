@@ -16,5 +16,10 @@
     "Medium": 6,
     "Low": 3,
     "Informational": 1
-  }
+  },
+  "mde_alert_frequency_boost_threshold": 2,
+  "mde_alert_frequency_boost_multiplier": 1.5,
+  "evidence_normalizations": [
+    {"pattern": "(?i)(c:\\\\users\\\\)[^\\\\]+(\\\\)", "replacement": "\\1<user>\\2"}
+  ]
 }
