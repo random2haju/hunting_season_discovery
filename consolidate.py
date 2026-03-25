@@ -131,6 +131,10 @@ def apply_prevalence_scoring(scenes: pd.DataFrame, cfg: dict) -> pd.DataFrame:
             norm["pattern"], norm["replacement"], regex=True
         )
 
+    # --- Auto-clustering via Drain3 (opt-in) ---
+    if cfg.get("use_evidence_clustering", False):
+        scenes["EvidenceNormalized"] = cluster_evidence(scenes, cfg)
+
     # --- Split into behavioral and MDE alert rows ---
     if "Severity" in scenes.columns:
         is_mde = scenes["Severity"].notna() & scenes["Severity"].ne("")
@@ -197,6 +201,60 @@ def apply_prevalence_scoring(scenes: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         ).round(1)
 
     return pd.concat([behavioral, mde], ignore_index=True)
+
+
+# ---------------------------------------------------------------------------
+# Evidence auto-clustering (Drain3)
+# ---------------------------------------------------------------------------
+
+def cluster_evidence(scenes: pd.DataFrame, cfg: dict) -> pd.Series:
+    """
+    Use Drain3 log template extraction to auto-cluster EvidenceNormalized strings
+    into canonical templates (e.g. 'Process: csc.exe | CmdLine: <*>').
+
+    Groups by DetectionType first so strings with the same KQL structure are
+    clustered together, not cross-pollinated between detection types.
+
+    Returns a Series of template strings aligned to scenes.index.
+    Requires: pip install drain3
+    """
+    try:
+        import logging
+        from drain3 import TemplateMiner
+        from drain3.template_miner_config import TemplateMinerConfig
+        logging.getLogger("drain3").setLevel(logging.WARNING)
+    except ImportError:
+        print("  [WARN] drain3 not installed — skipping evidence clustering. "
+              "Run: pip install drain3")
+        return scenes["EvidenceNormalized"]
+
+    sim_th = cfg.get("evidence_clustering_sim_threshold", 0.5)
+    result = scenes["EvidenceNormalized"].copy()
+
+    for det_type, group in scenes.groupby("DetectionType"):
+        unique_strings = group["EvidenceNormalized"].unique()
+        if len(unique_strings) < 2:
+            continue  # Nothing to cluster
+
+        tmpl_cfg = TemplateMinerConfig()
+        tmpl_cfg.drain_sim_th = sim_th
+        tmpl_cfg.drain_depth = 4
+        tmpl_cfg.parametrize_numeric_tokens = True
+
+        miner = TemplateMiner(config=tmpl_cfg)
+
+        template_map = {}
+        for ev in unique_strings:
+            res = miner.add_log_message(str(ev))
+            template_map[ev] = res["template_mined"]
+
+        result.loc[group.index] = group["EvidenceNormalized"].map(template_map)
+
+        n_templates = len(set(template_map.values()))
+        if n_templates < len(unique_strings):
+            print(f"  [CLUSTER] {det_type}: {len(unique_strings)} unique → {n_templates} template(s)")
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -419,16 +477,18 @@ def write_excel(
         write_sheet("Attack Chains", attack_chains)
 
         # 4. Stacking Analysis — rarest patterns first (best FP-reduction view)
+        # Groups by EvidenceNormalized (regex-normalised, or Drain3 template when clustering enabled)
         stacking_src = scenes.copy()
-        stacking_src["Evidence"] = stacking_src["Evidence"].str[:120]  # truncate for readability
+        stacking_src["EvidenceNormalized"] = stacking_src["EvidenceNormalized"].str[:120]
         stacking = (
-            stacking_src.groupby(["TacticCategory", "DetectionType", "Evidence"])
+            stacking_src.groupby(["TacticCategory", "DetectionType", "EvidenceNormalized"])
             .agg(
                 EnvDeviceCount=("DeviceName", "nunique"),
                 UniqueAccounts=("AccountName", "nunique"),
                 TotalHits=("DeviceName", "count"),
             )
             .reset_index()
+            .rename(columns={"EvidenceNormalized": "Evidence"})
             .sort_values("EnvDeviceCount")
         )
         supp_threshold = cfg.get("prevalence_suppression_threshold", 10)

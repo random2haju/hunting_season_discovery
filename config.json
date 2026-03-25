@@ -19,6 +19,8 @@
   },
   "mde_alert_frequency_boost_threshold": 2,
   "mde_alert_frequency_boost_multiplier": 1.5,
+  "use_evidence_clustering": false,
+  "evidence_clustering_sim_threshold": 0.5,
   "evidence_normalizations": [
     {"pattern": "(?i)(c:\\\\users\\\\)[^\\\\]+(\\\\)", "replacement": "\\1<user>\\2"},
     {"pattern": "(?i)(\\\\temp\\\\)[^\\\\]+\\.cmdline", "replacement": "\\1<random>.cmdline"}
