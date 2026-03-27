@@ -81,6 +81,8 @@ let all_suspicious = materialize(
         or (FileName =~ "bash.exe" and ProcessCommandLine has_any (
             "-c ", "curl", "wget", "nc ", "python", "perl", "ruby",
             "/dev/tcp", "chmod +x", "base64"
+        ) and InitiatingProcessFileName !in~ (
+            "Code.exe", "Cursor.exe", "WindowsTerminal.exe", "node.exe", "wt.exe"
         ))
         or (FileName =~ "msdt.exe" and ProcessCommandLine has_any (
             "ms-msdt:", "PCWDiagnostic", "IT_BrowseForFile", "IT_LaunchMethod"

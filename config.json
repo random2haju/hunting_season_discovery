@@ -31,6 +31,7 @@
   },
   "mde_alert_frequency_boost_threshold": 2,
   "mde_alert_frequency_boost_multiplier": 1.5,
+  "max_scenes_per_pattern_per_device": 3,
   "use_evidence_clustering": false,
   "evidence_clustering_sim_threshold": 0.5,
   "evidence_normalizations": [

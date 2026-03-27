@@ -67,6 +67,7 @@ New tactic categories not already in `config.json` will score as 1 and log a war
 | `use_evidence_clustering` | Enable Drain3 auto-clustering of Evidence strings into templates (default false) |
 | `evidence_clustering_sim_threshold` | Drain3 similarity threshold 0–1 (default 0.5); higher = less aggressive clustering |
 | `detection_type_multipliers` | Optional per-DetectionType score multiplier applied on top of tactic weights and severity |
+| `max_scenes_per_pattern_per_device` | Cap on how many times a single evidence pattern contributes score per device (0 = disabled, default 3); prevents volume inflation from repetitive benign tooling |
 
 ## What stays out of git
 

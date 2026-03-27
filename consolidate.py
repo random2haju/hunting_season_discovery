@@ -270,6 +270,41 @@ def cluster_evidence(scenes: pd.DataFrame, cfg: dict) -> pd.Series:
 
 
 # ---------------------------------------------------------------------------
+# Scene cap — prevent volume inflation from repetitive patterns
+# ---------------------------------------------------------------------------
+
+def apply_scene_cap(scenes: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """
+    Cap how many times a single normalized evidence pattern contributes score
+    per device. Prevents repetitive-but-benign tooling (e.g. bash invoked by
+    Claude Code / IDE terminals) from dominating TotalRisk through sheer volume.
+
+    Scenes beyond the cap have ScoreContribution zeroed out rather than dropped
+    so they still appear in analyst views (All Scenes / per-tactic sheets).
+
+    Config key: max_scenes_per_pattern_per_device (0 = disabled, default 3)
+    """
+    cap = cfg.get("max_scenes_per_pattern_per_device", 3)
+    if not cap:
+        return scenes
+
+    ev_col = "EvidenceNormalized" if "EvidenceNormalized" in scenes.columns else "Evidence"
+    scenes = scenes.copy()
+
+    # Rank each scene within its (device, pattern) group by time — earliest ranks lowest.
+    # Sort first, compute cumcount on the sorted frame, then align back by index.
+    sorted_scenes = scenes.sort_values("Timestamp")
+    seq = sorted_scenes.groupby(["DeviceName", ev_col]).cumcount() + 1
+    scenes["_seq"] = seq.reindex(scenes.index)
+    over_cap = scenes["_seq"] > cap
+    if over_cap.any():
+        print(f"  [CAP] {over_cap.sum()} scene(s) beyond cap of {cap}/pattern/device → ScoreContribution zeroed")
+    scenes.loc[over_cap, "ScoreContribution"] = 0.0
+    scenes = scenes.drop(columns=["_seq"])
+    return scenes
+
+
+# ---------------------------------------------------------------------------
 # Episode clustering
 # ---------------------------------------------------------------------------
 
@@ -600,6 +635,9 @@ def main():
           f"boost if <= {cfg.get('prevalence_boost_threshold', 3)} devices "
           f"(multiplier {cfg.get('prevalence_boost_multiplier', 1.5)}x)")
     scenes = apply_prevalence_scoring(scenes, cfg)
+
+    print("[*] Applying per-pattern scene cap...")
+    scenes = apply_scene_cap(scenes, cfg)
 
     print("\n[*] Clustering scenes into episodes (device-centric)...")
     scenes_dev = assign_episodes(scenes, episode_window, "DeviceName")
