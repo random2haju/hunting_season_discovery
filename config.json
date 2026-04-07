@@ -5,7 +5,8 @@
     "DefenseEvasion": 8,
     "Execution": 2,
     "Persistence": 5,
-    "Discovery": 3
+    "Discovery": 3,
+    "Exfiltration": 9
   },
   "detection_type_multipliers": {
     "LSASS Memory Dump": 1.5,
@@ -16,7 +17,18 @@
     "AV Exclusion Added": 1.5,
     "Log Cleared": 1.3,
     "Security Service Disabled": 1.5,
-    "Shadow Copy Deleted": 2.0
+    "Shadow Copy Deleted": 2.0,
+    "AI Data Exfiltration": 1.8,
+    "AI API Key Read": 1.5,
+    "Jupyter Shell Execution": 1.3,
+    "AI Agent Memory Write": 1.2
+  },
+  "detection_families": {
+    "AI Data Exfiltration":    "AI",
+    "AI API Key Read":         "AI",
+    "Shadow AI Tooling":       "AI",
+    "Jupyter Shell Execution": "AI",
+    "AI Agent Memory Write":   "AI"
   },
   "episode_window_hours": 4,
   "prevalence_suppression_threshold": 10,
@@ -36,6 +48,8 @@
   "evidence_clustering_sim_threshold": 0.5,
   "evidence_normalizations": [
     {"pattern": "(?i)(c:\\\\users\\\\)[^\\\\]+(\\\\)", "replacement": "\\1<user>\\2"},
-    {"pattern": "(?i)(\\\\temp\\\\)[^\\\\]+\\.cmdline", "replacement": "\\1<random>.cmdline"}
+    {"pattern": "(?i)(\\\\temp\\\\)[^\\\\]+\\.cmdline", "replacement": "\\1<random>.cmdline"},
+    {"pattern": "(?i)(RemoteUrl: https?://[^?#]+)[?#][^|]*", "replacement": "\\1<params>"},
+    {"pattern": "(?i)(sk-(?:proj-|ant-|or-v1-)?)[A-Za-z0-9_\\-]{10,}", "replacement": "\\1<redacted>"}
   ]
 }

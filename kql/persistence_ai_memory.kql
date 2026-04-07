@@ -1,0 +1,139 @@
+// ============================================================
+// AI Agent Memory File Persistence
+// TacticCategory: Persistence
+// Source: DeviceFileEvents
+//
+// Detects creation of AI agent framework memory/state files on
+// endpoints where they are not expected.
+//
+// AI agent frameworks (MemGPT/Letta, AutoGen, CrewAI, LangChain,
+// Claude Code, etc.) write persistent memory to disk, enabling
+// agents to maintain context across reboots. This persistence
+// mechanism is functionally equivalent to a Run key for agents.
+//
+// Two threat scenarios:
+//   1. Unauthorized agent deployment — an attacker or insider
+//      installs an AI agent framework on a compromised device.
+//      The memory directory creation is a reliable first-seen
+//      indicator of agentic activity the team doesn't know about.
+//   2. Prompt injection via memory manipulation — a non-AI
+//      process (cmd.exe, PowerShell) writes to an AI agent's
+//      memory file, planting instructions that will be executed
+//      by the agent in future sessions (persistence + injection).
+//
+// Two signals:
+//   1. First-time creation of known AI agent memory directories
+//   2. Non-AI processes writing INTO those directories (highest
+//      confidence — this is the memory manipulation scenario)
+//
+// FP Reduction:
+//   - Legitimate AI tool processes excluded by name+parent check
+//     so Claude Code, Cursor, VS Code don't self-flag
+//   - First-seen baselining suppresses sanctioned agent installs
+//     on the second hunt run
+//
+// Noise sources:
+//   - Approved AI developer workstations (add to exclusions)
+//   - AI coding tools (Claude Code, Cursor) — excluded by default
+//
+// Tuning:
+//   hunt_window          — how recent the reported events must be
+//   baseline_window      — total lookback including baseline period
+//   prevalence_threshold — suppress patterns seen on > N devices
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+
+// Known AI agent framework memory directory path fragments
+let ai_memory_paths = dynamic([
+    "\\.letta\\",
+    "\\.memgpt\\",
+    "\\.autogpt\\",
+    "\\.crewai\\",
+    "\\.agentops\\",
+    "\\.continue\\",
+    "\\agent_workspace\\",
+    "\\agent_memory\\",
+    "\\.claude\\memory\\"   // Claude Code long-term memory
+]);
+
+// AI tool processes legitimately writing to their own memory dirs
+// Excluded to avoid self-flagging of approved tools
+let known_ai_writers = dynamic([
+    "node.exe",            // Claude Code, Cursor, VS Code extensions
+    "claude-code.exe",
+    "claude.exe",
+    "Code.exe",
+    "Cursor.exe",
+    "windsurf.exe",
+    "python.exe",          // CrewAI, LangChain, MemGPT runtimes
+    "ollama.exe"
+]);
+
+// --- Signal 1: Creation of AI agent memory directories ---
+let dir_creation_hits = materialize(
+    DeviceFileEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType in ("FolderCreated", "FileCreated")
+    | where FolderPath has_any (ai_memory_paths)
+    // Flag the first time this path appears on a device — first-seen handles recurring
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "MemPath: ",     FolderPath, "\\", FileName,
+        " | Action: ",   ActionType,
+        " | Writer: ",   InitiatingProcessFileName,
+        " | WriterPath: ", InitiatingProcessFolderPath,
+        " | Parent: ",   InitiatingProcessParentFileName
+    )
+    | project Timestamp, DeviceName, AccountName, Evidence
+);
+
+// --- Signal 2: Non-AI processes writing into AI memory directories ---
+// This is the memory manipulation / prompt injection scenario.
+// A shell or script writing to .claude\memory\ or .crewai\ is adversarial.
+let injection_hits = materialize(
+    DeviceFileEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType in ("FileCreated", "FileModified")
+    | where FolderPath has_any (ai_memory_paths)
+    // Exclude legitimate AI tool writers — they should write to their own dirs
+    | where InitiatingProcessFileName !in~ (known_ai_writers)
+    // Also exclude system processes
+    | where InitiatingProcessFileName !in~ (
+        "SearchIndexer.exe", "MsMpEng.exe", "SenseIR.exe",
+        "svchost.exe", "System", "Registry"
+    )
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "InjectedPath: ", FolderPath, "\\", FileName,
+        " | Writer: ",    InitiatingProcessFileName,
+        " | WriterPath: ", InitiatingProcessFolderPath,
+        " | CmdLine: ",   InitiatingProcessCommandLine,
+        " | Parent: ",    InitiatingProcessParentFileName,
+        " | Action: ",    ActionType
+    )
+    | project Timestamp, DeviceName, AccountName, Evidence
+);
+
+let all_suspicious = materialize(
+    union dir_creation_hits, injection_hits
+    | extend DetectionType  = "AI Agent Memory Write"
+    | extend TacticCategory = "Persistence"
+    | project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+);
+
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

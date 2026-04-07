@@ -1,0 +1,106 @@
+// ============================================================
+// Data Exfiltration to AI Provider APIs
+// TacticCategory: Exfiltration
+// Source: DeviceNetworkEvents
+//
+// Detects non-browser processes making outbound connections to
+// known AI provider API endpoints. Catches data being sent out
+// of the estate to cloud AI services — the highest-value AI
+// threat hunting detection.
+//
+// FP Reduction:
+//   - Browsers excluded (legitimate user AI sessions)
+//   - VS Code Copilot excluded via precise parent-process check
+//     rather than blanket node.exe exclusion
+//   - First-seen baselining suppresses recurring developer scripts
+//     after the first hunt run
+//   - Prevalence threshold suppresses patterns across many devices
+//     (IT tooling, sanctioned automation)
+//
+// Noise sources to watch:
+//   - CI/CD service accounts running AI-assisted pipelines
+//     → add AccountName to exclusions below
+//   - Sanctioned enterprise AI integrations
+//     → add InitiatingProcessFileName to known_ai_ide_processes
+//
+// Tuning:
+//   hunt_window          — how recent the reported events must be
+//   baseline_window      — total lookback including baseline period
+//   prevalence_threshold — suppress patterns seen on > N devices
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+
+// Browser processes — these legitimately connect to AI APIs via user sessions
+let browser_processes = dynamic([
+    "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe",
+    "iexplore.exe", "vivaldi.exe"
+]);
+
+// Known AI provider API hostnames — extend as new providers emerge
+let ai_api_domains = dynamic([
+    "api.openai.com",
+    "api.anthropic.com",
+    "generativelanguage.googleapis.com",
+    "api.mistral.ai",
+    "api.cohere.ai",
+    "api.together.xyz",
+    "api.groq.com",
+    "openrouter.ai",
+    "api.perplexity.ai",
+    "bedrock-runtime.amazonaws.com",
+    "cognitiveservices.azure.com",
+    "api.replicate.com",
+    "api.huggingface.co",
+    "inference.huggingface.co"
+]);
+
+let all_suspicious = materialize(
+    DeviceNetworkEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType == "ConnectionSuccess"
+    | where RemoteUrl has_any (ai_api_domains)
+        or RemoteIP has_any (ai_api_domains)
+    | where RemotePort == 443
+    // Exclude browsers
+    | where InitiatingProcessFileName !in~ (browser_processes)
+    // Exclude VS Code Copilot (node.exe running under Code.exe/Cursor.exe) without
+    // blanket-excluding all node.exe — that would hide attacker scripts
+    | where not (
+        InitiatingProcessFileName =~ "node.exe"
+        and InitiatingProcessParentFileName in~ ("Code.exe", "Cursor.exe", "windsurf.exe")
+    )
+    // Exclude sanctioned enterprise AI tools by process name — add as needed:
+    // | where InitiatingProcessFileName !in~ ("copilot-agent.exe", "enterprise-ai.exe")
+    // Exclude service accounts — add CI/CD accounts as needed:
+    // | where InitiatingProcessAccountName !in~ ("svc_cicd", "github-actions")
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "Process: ",      InitiatingProcessFileName,
+        " | Parent: ",    InitiatingProcessParentFileName,
+        " | CmdLine: ",   InitiatingProcessCommandLine,
+        " | Destination: ", RemoteUrl,
+        " | RemoteIP: ",  tostring(RemoteIP),
+        " | InitPath: ",  InitiatingProcessFolderPath
+    )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType    = "AI Data Exfiltration",
+        TacticCategory   = "Exfiltration",
+        Evidence
+);
+
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

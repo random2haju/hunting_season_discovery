@@ -1,0 +1,103 @@
+// ============================================================
+// Jupyter Notebook Shell Execution Abuse
+// TacticCategory: Execution
+// Source: DeviceProcessEvents
+//
+// Detects shell or network tool processes spawned as direct
+// children of Jupyter notebook server or IPython kernel processes.
+//
+// Normal notebook execution stays within the Python interpreter.
+// Shell spawning (cmd.exe, powershell.exe, etc.) from Jupyter
+// indicates OS command execution outside the intended sandbox,
+// which is a specific technique in two threat scenarios:
+//   1. Attacker with stolen Jupyter token executing commands
+//      via the notebook interface (common in data science envs
+//      with weak or no authentication)
+//   2. Insider threat using notebooks as a shell proxy to avoid
+//      direct terminal activity logging
+//
+// FP Reduction:
+//   - First-seen baselining handles recurring legitimate notebook
+//     pipelines that intentionally use shell cells (e.g., !pip)
+//   - Prevalence threshold suppresses patterns shared across
+//     many machines (e.g., sanctioned notebook CI workflows)
+//   - python.exe as a child is included but can be tightened
+//     with the CmdLine guard below if too noisy
+//
+// Noise sources:
+//   - Notebooks using !pip install, !git clone (very common)
+//     → If too noisy, add "pip.exe" and "git.exe" to an
+//       explicit allow-list here, or narrow python.exe child
+//       detection with: ProcessCommandLine has_any ("http", "base64")
+//
+// Tuning:
+//   hunt_window          — how recent the reported events must be
+//   baseline_window      — total lookback including baseline period
+//   prevalence_threshold — suppress patterns seen on > N devices
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+
+// Jupyter and IPython kernel process names (parent processes)
+let jupyter_parents = dynamic([
+    "jupyter-notebook.exe", "jupyter-lab.exe", "jupyter.exe",
+    "jupyter-server.exe", "jupyter-kernel.exe",
+    "ipykernel_launcher.exe"
+]);
+
+// Shell and execution-capable processes that should not be spawned by Jupyter
+let suspicious_children = dynamic([
+    "cmd.exe", "powershell.exe", "pwsh.exe",
+    "bash.exe", "sh.exe", "wsl.exe",
+    "curl.exe", "wget.exe", "bitsadmin.exe",
+    "certutil.exe", "mshta.exe", "wscript.exe",
+    "cscript.exe", "regsvr32.exe", "rundll32.exe",
+    "net.exe", "net1.exe", "sc.exe",
+    "python.exe"  // second Python process spawned by notebook — not the kernel itself
+]);
+
+let all_suspicious = materialize(
+    DeviceProcessEvents
+    | where Timestamp > ago(baseline_window)
+    // Child is a suspicious shell or network process
+    | where FileName in~ (suspicious_children)
+    // Parent is a Jupyter process (by name or command line — covers WSL/Linux paths)
+    | where InitiatingProcessFileName in~ (jupyter_parents)
+        or InitiatingProcessCommandLine has "ipykernel_launcher"
+        or InitiatingProcessCommandLine has "jupyter-notebook"
+        or InitiatingProcessCommandLine has "jupyter lab"
+    // Optional: tighten python.exe child detection to only flag when cmdline
+    // contains network or encoding indicators (uncomment to reduce !pip noise):
+    // | where not (
+    //     FileName =~ "python.exe"
+    //     and not (ProcessCommandLine has_any ("http", "base64", "--data", "socket", "urllib"))
+    // )
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "ShellSpawned: ",    FileName,
+        " | CmdLine: ",      ProcessCommandLine,
+        " | JupyterParent: ", InitiatingProcessFileName,
+        " | ParentCmdLine: ", InitiatingProcessCommandLine,
+        " | JupyterPath: ",   InitiatingProcessFolderPath
+    )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType  = "Jupyter Shell Execution",
+        TacticCategory = "Execution",
+        Evidence
+);
+
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

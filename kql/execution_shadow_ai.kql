@@ -1,0 +1,113 @@
+// ============================================================
+// Shadow AI / Local LLM Tooling
+// TacticCategory: Execution
+// Source: DeviceProcessEvents + DeviceFileEvents
+//
+// Detects installation and execution of local AI inference tools.
+// Two scenarios:
+//   1. Employees running local models to bypass DLP/proxy controls
+//   2. Attackers deploying local LLMs for payload generation or
+//      C2 command interpretation without touching AI APIs
+//
+// Two signals:
+//   1. Process execution of known local LLM binary names
+//   2. File creation of .gguf/.ggml model weight files in
+//      user-writable paths (indicates a model was downloaded)
+//
+// FP Reduction:
+//   - First-seen baselining: approved developer ollama installs
+//     are suppressed on the second hunt run
+//   - Prevalence threshold handles environments with sanctioned
+//     local AI tooling on many developer machines
+//   - .bin extension restricted to model-specific paths to avoid
+//     FP noise from other binary file types
+//
+// Noise sources:
+//   - ML engineer workstations with approved local inference
+//     → lower prevalence_threshold or add DeviceName exclusions
+//
+// Tuning:
+//   hunt_window          — how recent the reported events must be
+//   baseline_window      — total lookback including baseline period
+//   prevalence_threshold — suppress patterns seen on > N devices
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+
+// Known local LLM tool binary names
+let shadow_ai_binaries = dynamic([
+    "ollama.exe", "ollama",
+    "llama-server.exe", "llama-cli.exe",
+    "lm-studio.exe", "lmstudio.exe",
+    "llm.exe",
+    "gpt4all.exe",
+    "jan.exe",
+    "koboldcpp.exe",
+    "localai.exe", "localai",
+    "vllm",
+    "mistral.exe",
+    "text-generation-webui.py"
+]);
+
+// --- Signal 1: Process execution of local LLM tools ---
+let process_hits = materialize(
+    DeviceProcessEvents
+    | where Timestamp > ago(baseline_window)
+    | where FileName in~ (shadow_ai_binaries)
+        or ProcessCommandLine has_any (shadow_ai_binaries)
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "Process: ",   FileName,
+        " | Parent: ", InitiatingProcessFileName,
+        " | CmdLine: ", ProcessCommandLine,
+        " | Path: ",   FolderPath
+    )
+    | project Timestamp, DeviceName, AccountName, Evidence
+);
+
+// --- Signal 2: Model weight file creation in user-writable paths ---
+// .gguf/.ggml are unambiguous model formats; .bin restricted to model paths
+let model_file_hits = materialize(
+    DeviceFileEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType in ("FileCreated", "FileModified")
+    | where (FileName has ".gguf" or FileName has ".ggml")
+        or (FileName has ".bin" and FolderPath has_any (
+            "\\.ollama\\", "\\lm-studio\\", "\\jan\\", "\\models\\", "\\localai\\"
+        ))
+    | where FolderPath has_any (
+        "\\AppData\\", "\\Users\\", "\\Downloads\\", "\\Temp\\",
+        "\\.ollama\\", "\\lm-studio\\", "\\jan\\", "\\models\\", "\\localai\\"
+    )
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "ModelFile: ",    FolderPath, "\\", FileName,
+        " | Action: ",    ActionType,
+        " | DroppedBy: ", InitiatingProcessFileName,
+        " | CmdLine: ",   InitiatingProcessCommandLine
+    )
+    | project Timestamp, DeviceName, AccountName, Evidence
+);
+
+let all_suspicious = materialize(
+    union process_hits, model_file_hits
+    | extend DetectionType  = "Shadow AI Tooling"
+    | extend TacticCategory = "Execution"
+    | project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+);
+
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

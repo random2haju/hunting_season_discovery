@@ -100,6 +100,11 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
 
     scenes["DeviceName"] = scenes["DeviceName"].str.strip().str.lower()
     scenes["AccountName"] = scenes["AccountName"].str.strip().str.lower()
+
+    # Tag each scene with its detection family (AI vs Traditional) for analyst filtering
+    families = cfg.get("detection_families", {})
+    scenes["Family"] = scenes["DetectionType"].map(families).fillna("Traditional")
+
     return scenes
 
 
@@ -545,21 +550,7 @@ def write_excel(
         # 3. Attack Chains
         write_sheet("Attack Chains", attack_chains)
 
-        # 4. Stacking Analysis — rarest patterns first (best FP-reduction view)
-        # Groups by EvidenceNormalized (regex-normalised, or Drain3 template when clustering enabled)
-        stacking_src = scenes.copy()
-        stacking_src["EvidenceNormalized"] = stacking_src["EvidenceNormalized"].str[:120]
-        stacking = (
-            stacking_src.groupby(["TacticCategory", "DetectionType", "EvidenceNormalized"])
-            .agg(
-                EnvDeviceCount=("DeviceName", "nunique"),
-                UniqueAccounts=("AccountName", "nunique"),
-                TotalHits=("DeviceName", "count"),
-            )
-            .reset_index()
-            .rename(columns={"EvidenceNormalized": "Evidence"})
-            .sort_values("EnvDeviceCount")
-        )
+        # Shared prevalence multiplier function used by both stacking sheets
         supp_threshold = cfg.get("prevalence_suppression_threshold", 10)
         boost_threshold = cfg.get("prevalence_boost_threshold", 3)
         supp_mult  = cfg.get("prevalence_suppression_multiplier", 0.2)
@@ -573,8 +564,31 @@ def write_excel(
                 return boost_mult
             return 1.0
 
-        stacking["PrevalenceMultiplier"] = stacking.apply(_stack_mult, axis=1)
-        write_sheet("Stacking Analysis", stacking)
+        def _build_stacking(src_scenes):
+            src = src_scenes.copy()
+            src["EvidenceNormalized"] = src["EvidenceNormalized"].str[:120]
+            stk = (
+                src.groupby(["TacticCategory", "DetectionType", "EvidenceNormalized"])
+                .agg(
+                    EnvDeviceCount=("DeviceName", "nunique"),
+                    UniqueAccounts=("AccountName", "nunique"),
+                    TotalHits=("DeviceName", "count"),
+                )
+                .reset_index()
+                .rename(columns={"EvidenceNormalized": "Evidence"})
+                .sort_values("EnvDeviceCount")
+            )
+            stk["PrevalenceMultiplier"] = stk.apply(_stack_mult, axis=1)
+            return stk
+
+        # 4. AI Threat Summary — Stacking Analysis filtered to AI-family detections only
+        ai_scenes = scenes[scenes["Family"] == "AI"].copy()
+        if not ai_scenes.empty:
+            write_sheet("AI Threat Summary", _build_stacking(ai_scenes))
+
+        # 5. Stacking Analysis — all detections, rarest patterns first (primary analyst view)
+        # Groups by EvidenceNormalized (regex-normalised, or Drain3 template when clustering enabled)
+        write_sheet("Stacking Analysis", _build_stacking(scenes))
 
         # 5. Episodes (device-centric)
         write_sheet("Episodes", device_episodes)
@@ -584,7 +598,7 @@ def write_excel(
             tactic_scenes = scenes[scenes["TacticCategory"] == tactic].copy()
             tactic_scenes = tactic_scenes.sort_values("Timestamp", ascending=False)
             export_cols = ["Timestamp", "DeviceName", "AccountName", "DetectionType",
-                           "TacticCategory", "Evidence", "EnvDeviceCount",
+                           "TacticCategory", "Family", "Evidence", "EnvDeviceCount",
                            "PrevalenceMultiplier", "SourceFile"]
             tactic_scenes = tactic_scenes[[c for c in export_cols if c in tactic_scenes.columns]]
             write_sheet(tactic, tactic_scenes)
@@ -592,7 +606,7 @@ def write_excel(
         # 7. All Scenes
         all_scenes = scenes.sort_values("Timestamp", ascending=False)
         export_cols = ["Timestamp", "DeviceName", "AccountName", "DetectionType",
-                       "TacticCategory", "Evidence", "EnvDeviceCount",
+                       "TacticCategory", "Family", "Evidence", "EnvDeviceCount",
                        "PrevalenceMultiplier", "SourceFile"]
         all_scenes = all_scenes[[c for c in export_cols if c in all_scenes.columns]]
         write_sheet("All Scenes", all_scenes)
