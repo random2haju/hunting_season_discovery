@@ -68,6 +68,17 @@ New tactic categories not already in `config.json` will score as 1 and log a war
 | `evidence_clustering_sim_threshold` | Drain3 similarity threshold 0–1 (default 0.5); higher = less aggressive clustering |
 | `detection_type_multipliers` | Optional per-DetectionType score multiplier applied on top of tactic weights and severity |
 | `max_scenes_per_pattern_per_device` | Cap on how many times a single evidence pattern contributes score per device (0 = disabled, default 3); prevents volume inflation from repetitive benign tooling |
+| `lolbin_trust_tiers` | Three lists of process names: `baseline_common` (bash, python, node), `contextual` (wscript, rundll32), `high_signal` (certutil, mshta). Shell/execution scenes are classified into a tier for scoring. |
+| `lolbin_tier_base_multipliers` | Score multiplier per tier: `baseline_common`=0.3, `contextual`=1.0, `high_signal`=1.8 |
+| `developer_parent_processes` | Process names treated as trusted dev parents (code.exe, claude.exe, etc.). Baseline-common LOLBins with these parents receive `dev_context_discount`. |
+| `dev_context_discount` | Additional multiplier applied to baseline-common LOLBins whose parent is a dev tool (default 0.25). Combined with the tier multiplier: bash+claude.exe gets ×0.3×0.25=0.075, floored at 0.05. |
+| `cmdline_risk_patterns` | Three pattern lists: `high_risk` (base64 -d, IEX, certutil -decode), `medium_risk` (whoami, net user, curl\|bash), `low_risk` (git, npm, pip). Matched against the `CmdLine` field in Evidence. |
+| `cmdline_risk_multipliers` | Multipliers per pattern tier: `high_risk`=2.0, `medium_risk`=1.3, `low_risk`=0.4, `neutral`=1.0 |
+| `behavior_families` | Maps each DetectionType to a BehaviorFamily string (e.g. `LOLBin Execution` → `ShellExecution`). Used for per-episode family caps and corroboration bonuses. |
+| `episode_family_cap` | Max scenes per BehaviorFamily per episode that contribute full score (default 3). Beyond this, `episode_family_cap_multipliers[family]` is applied. |
+| `episode_family_cap_multipliers` | Per-family over-cap multiplier (e.g. `ShellExecution`=0.15). High-value families like CredentialDump default to 1.0 (no reduction). |
+| `corroboration_bonus` | Reward episodes that mix behavior families. `min_families_for_bonus`=2, `bonus_per_additional_family`=1.4 (2 families → 1.4×, 3 → 1.96×), `max_bonus_multiplier`=5.0. |
+| `season_diminishing_returns` | Controls the season TotalRisk formula. `diminishing_log_base`=2.0 (rank weight = 1/log2(rank+2)), `same_family_decay_after`=1, `same_family_decay_factor`=0.5 (2nd same-family episode = 0.5×, 3rd = 0.25×). |
 
 ## What stays out of git
 

@@ -51,5 +51,76 @@
     {"pattern": "(?i)(\\\\temp\\\\)[^\\\\]+\\.cmdline", "replacement": "\\1<random>.cmdline"},
     {"pattern": "(?i)(RemoteUrl: https?://[^?#]+)[?#][^|]*", "replacement": "\\1<params>"},
     {"pattern": "(?i)(sk-(?:proj-|ant-|or-v1-)?)[A-Za-z0-9_\\-]{10,}", "replacement": "\\1<redacted>"}
-  ]
+  ],
+
+  "lolbin_trust_tiers": {
+    "baseline_common": ["bash.exe", "python.exe", "python3.exe", "node.exe", "perl.exe", "ruby.exe", "sh.exe", "wsl.exe"],
+    "contextual":      ["wscript.exe", "cscript.exe", "rundll32.exe", "regsvr32.exe", "msiexec.exe", "msbuild.exe", "csc.exe", "installutil.exe"],
+    "high_signal":     ["certutil.exe", "mshta.exe", "msdt.exe", "cmstp.exe", "odbcconf.exe", "forfiles.exe", "pcalua.exe", "presentationhost.exe"]
+  },
+  "lolbin_tier_base_multipliers": {
+    "baseline_common": 0.3,
+    "contextual":      1.0,
+    "high_signal":     1.8,
+    "unknown":         1.0
+  },
+  "developer_parent_processes": [
+    "code.exe", "cursor.exe", "windsurf.exe", "claude.exe",
+    "windowsterminal.exe", "wt.exe", "node.exe", "idea64.exe", "pycharm64.exe"
+  ],
+  "dev_context_discount": 0.25,
+  "cmdline_risk_patterns": {
+    "high_risk":   ["base64 -d", "base64 -D", "-EncodedCommand", "IEX", "Invoke-Expression", "certutil -decode", "certutil -urlcache", "DownloadString", "DownloadFile", "mshta http"],
+    "medium_risk": ["whoami", "net user", "net group", "ipconfig /all", "systeminfo", "nltest", "net view", "curl.*| bash", "wget.*| sh", "nmap", "masscan"],
+    "low_risk":    ["git ", "npm ", "pip ", "pytest", "cargo ", "make ", "cmake ", "mvn ", "gradle ", "yarn ", "pnpm ", "python setup.py"]
+  },
+  "cmdline_risk_multipliers": {
+    "high_risk":   2.0,
+    "medium_risk": 1.3,
+    "low_risk":    0.4,
+    "neutral":     1.0
+  },
+  "behavior_families": {
+    "LOLBin Execution":          "ShellExecution",
+    "Discovery Command":         "NetworkRecon",
+    "LSASS Access":              "CredentialDump",
+    "LSASS Memory Dump":         "CredentialDump",
+    "LSASS Handle Open":         "CredentialDump",
+    "Mimikatz Execution":        "CredentialDump",
+    "Suspicious Logon":          "LateralMovement",
+    "Remote Execution Tool":     "LateralMovement",
+    "Run Key Modified":          "Persistence",
+    "Scheduled Task Created":    "Persistence",
+    "Startup Folder Drop":       "Persistence",
+    "AI Agent Memory Write":     "Persistence",
+    "AV Exclusion Added":        "DefenseEvasion",
+    "AV Protection Disabled":    "DefenseEvasion",
+    "Log Cleared":               "DefenseEvasion",
+    "Shadow Copy Deleted":       "DefenseEvasion",
+    "Security Service Disabled": "DefenseEvasion",
+    "AI Data Exfiltration":      "DataExfiltration",
+    "AI API Key Read":           "CredentialDump",
+    "Jupyter Shell Execution":   "ShellExecution",
+    "Shadow AI Tooling":         "ShellExecution"
+  },
+  "episode_family_cap": 3,
+  "episode_family_cap_multipliers": {
+    "ShellExecution":   0.15,
+    "NetworkRecon":     0.3,
+    "Persistence":      0.5,
+    "LateralMovement":  1.0,
+    "CredentialDump":   1.0,
+    "DataExfiltration": 1.0,
+    "DefenseEvasion":   1.0
+  },
+  "corroboration_bonus": {
+    "min_families_for_bonus":      2,
+    "bonus_per_additional_family": 1.4,
+    "max_bonus_multiplier":        5.0
+  },
+  "season_diminishing_returns": {
+    "diminishing_log_base":     2.0,
+    "same_family_decay_after":  1,
+    "same_family_decay_factor": 0.5
+  }
 }

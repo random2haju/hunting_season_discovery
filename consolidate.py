@@ -14,14 +14,112 @@ Usage:
 
 import argparse
 import json
+import math
 import os
+import re
 import sys
 import warnings
 from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 
 REQUIRED_COLUMNS = {"Timestamp", "DeviceName", "AccountName", "DetectionType", "TacticCategory", "Evidence"}
+
+
+# ---------------------------------------------------------------------------
+# Context classification helpers
+# ---------------------------------------------------------------------------
+
+def _build_tier_lookup(cfg: dict) -> dict:
+    """Build O(1) process-name → tier-name dict from lolbin_trust_tiers config."""
+    lookup = {}
+    for tier, procs in cfg.get("lolbin_trust_tiers", {}).items():
+        for p in procs:
+            lookup[p.lower()] = tier
+    return lookup
+
+
+def parse_evidence_fields(evidence_str: str) -> dict:
+    """
+    Parse pipe-delimited 'Key: value | Key2: value2' Evidence string into a
+    lowercase-key dict.  Segments without ': ' are silently ignored.
+    """
+    result = {}
+    if not isinstance(evidence_str, str) or not evidence_str.strip():
+        return result
+    for segment in evidence_str.split(" | "):
+        if ": " in segment:
+            key, _, value = segment.partition(": ")
+            result[key.strip().lower()] = value.strip()
+    return result
+
+
+def classify_lolbin_tier(detection_type: str, parsed_ev: dict, tier_lookup: dict) -> str:
+    """
+    Return the LOLBin trust tier for a scene.
+    Only classifies shell/execution detection types; all others return 'not_lolbin'.
+    """
+    lolbin_types = {"LOLBin Execution", "Jupyter Shell Execution", "Shadow AI Tooling"}
+    if detection_type not in lolbin_types:
+        return "not_lolbin"
+    process = parsed_ev.get("process", "").lower()
+    return tier_lookup.get(process, "unknown")
+
+
+def classify_execution_context(parsed_ev: dict, dev_parents_lower: list) -> str:
+    """
+    Derive execution context from the Parent field in parsed Evidence.
+    Returns 'DeveloperTooling' | 'SuspiciousShape' | 'Unknown'.
+    """
+    parent = parsed_ev.get("parent", "").lower()
+    if not parent:
+        return "Unknown"
+    if parent in dev_parents_lower:
+        return "DeveloperTooling"
+    if parent in {"svchost.exe", "services.exe", "lsass.exe", "winlogon.exe"}:
+        return "SuspiciousShape"
+    return "Unknown"
+
+
+def score_commandline_shape(parsed_ev: dict, cfg: dict) -> float:
+    """
+    Score the CmdLine field from parsed Evidence for suspicious vs benign patterns.
+    Returns a float multiplier: high_risk=2.0, medium_risk=1.3, low_risk=0.4, neutral=1.0.
+    Patterns are checked in priority order; first match wins.
+    """
+    cmdline = parsed_ev.get("cmdline", "")
+    if not cmdline:
+        return 1.0
+    risk_patterns = cfg.get("cmdline_risk_patterns", {})
+    risk_multipliers = cfg.get("cmdline_risk_multipliers", {})
+    cmdline_lower = cmdline.lower()
+    for tier in ("high_risk", "medium_risk", "low_risk"):
+        for pattern in risk_patterns.get(tier, []):
+            if ".*" in pattern:
+                if re.search(pattern, cmdline, flags=re.IGNORECASE):
+                    return risk_multipliers.get(tier, 1.0)
+            elif pattern.lower() in cmdline_lower:
+                return risk_multipliers.get(tier, 1.0)
+    return risk_multipliers.get("neutral", 1.0)
+
+
+def compute_context_multiplier(tier: str, context: str, cmdline_score: float, cfg: dict) -> float:
+    """
+    Combine LOLBin tier multiplier × developer-context discount × command-line shape score.
+    Floor at 0.05 so every scene stays visible to analysts.
+    """
+    tier_mults = cfg.get("lolbin_tier_base_multipliers", {})
+    # Non-LOLBin scenes are not adjusted by tier
+    tier_mult = 1.0 if tier == "not_lolbin" else tier_mults.get(tier, 1.0)
+    dev_discount = 1.0
+    # Dev discount only applies to baseline-common tier — contextual/high-signal are suspicious regardless of parent
+    if context == "DeveloperTooling" and tier == "baseline_common":
+        dev_discount = cfg.get("dev_context_discount", 0.25)
+    # Suspicious parent escalates contextual tier to high-signal scoring
+    if context == "SuspiciousShape" and tier == "contextual":
+        tier_mult = tier_mults.get("high_signal", 1.8)
+    return max(round(tier_mult * dev_discount * cmdline_score, 3), 0.05)
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +195,44 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
             scenes["ScoreContribution"]
             * scenes["DetectionType"].map(dt_mult).fillna(1.0)
         ).round(1)
+
+    # --- Context classification pipeline ---
+    # Parses Evidence string once and derives LOLBin tier, parent context, and
+    # command-line shape; combines them into a ContextMultiplier applied to ScoreContribution.
+    tier_lookup = _build_tier_lookup(cfg)
+    dev_parents_lower = {p.lower() for p in cfg.get("developer_parent_processes", [])}
+    behavior_families_map = cfg.get("behavior_families", {})
+
+    parsed_evs = scenes["Evidence"].apply(parse_evidence_fields)
+
+    scenes["LolbinTrustTier"] = [
+        classify_lolbin_tier(dt, pe, tier_lookup)
+        for dt, pe in zip(scenes["DetectionType"], parsed_evs)
+    ]
+    scenes["ExecutionContext"] = [
+        classify_execution_context(pe, dev_parents_lower) for pe in parsed_evs
+    ]
+    scenes["CommandLineRiskScore"] = [
+        score_commandline_shape(pe, cfg) for pe in parsed_evs
+    ]
+    scenes["ContextMultiplier"] = [
+        compute_context_multiplier(tier, ctx, clrs, cfg)
+        for tier, ctx, clrs in zip(
+            scenes["LolbinTrustTier"], scenes["ExecutionContext"], scenes["CommandLineRiskScore"]
+        )
+    ]
+    scenes["ScoreContribution"] = (
+        scenes["ScoreContribution"] * scenes["ContextMultiplier"]
+    ).round(2)
+    scenes["BehaviorFamily"] = scenes["DetectionType"].map(behavior_families_map).fillna("Unknown")
+    scenes["TrustContext"] = np.where(
+        (scenes["ExecutionContext"] == "DeveloperTooling") & (scenes["LolbinTrustTier"] == "baseline_common"),
+        "DevContext",
+        np.where(
+            (scenes["ExecutionContext"] == "SuspiciousShape") | (scenes["CommandLineRiskScore"] >= 1.3),
+            "Suspicious", "Neutral"
+        )
+    )
 
     scenes["DeviceName"] = scenes["DeviceName"].str.strip().str.lower()
     scenes["AccountName"] = scenes["AccountName"].str.strip().str.lower()
@@ -339,24 +475,69 @@ def assign_episodes(scenes: pd.DataFrame, window_hours: float, entity_col: str) 
     return df
 
 
-def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict) -> pd.DataFrame:
-    """Aggregate scenes into episode-level summary."""
+def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict, cfg: dict = None) -> pd.DataFrame:
+    """
+    Aggregate scenes into episode-level summary.
+
+    New behaviour (when cfg supplied):
+    - Per-behavior-family cap within each episode: same-family scenes beyond
+      episode_family_cap are multiplied by episode_family_cap_multipliers[family]
+      instead of contributing full score.  Mirrors the scene-level cap but at
+      the family level, so a 20-scene bash episode still only counts a few times.
+    - Corroboration multiplier: episodes that mix multiple behavior families
+      earn a bonus multiplier (e.g. ShellExecution + CredentialDump = 1.4×).
+    """
+    cfg = cfg or {}
     ep_col = f"EpisodeID_{entity_col}"
     grp = scenes.groupby([entity_col, ep_col])
 
+    family_cap      = cfg.get("episode_family_cap", 3)
+    family_cap_mults = cfg.get("episode_family_cap_multipliers", {})
+    corr_cfg        = cfg.get("corroboration_bonus", {})
+    min_fam         = corr_cfg.get("min_families_for_bonus", 2)
+    bonus_per       = corr_cfg.get("bonus_per_additional_family", 1.4)
+    max_bonus       = corr_cfg.get("max_bonus_multiplier", 5.0)
+
     records = []
     for (entity, ep_id), g in grp:
+        g = g.sort_values("Timestamp")
+
+        # Per-family cap: count occurrences per family; scenes beyond cap get a reduced multiplier
+        family_counter: dict = {}
+        adj_scores = []
+        for _, row in g.iterrows():
+            fam = row.get("BehaviorFamily", "Unknown")
+            family_counter[fam] = family_counter.get(fam, 0) + 1
+            if family_counter[fam] > family_cap:
+                over_cap_mult = family_cap_mults.get(fam, 0.2)
+                adj_scores.append(row["ScoreContribution"] * over_cap_mult)
+            else:
+                adj_scores.append(row["ScoreContribution"])
+
+        base_score = sum(adj_scores)
+
+        # Corroboration bonus: reward episodes with multiple distinct behavior families
+        unique_fams = set(g["BehaviorFamily"].dropna()) - {"Unknown"}
+        n_fams = len(unique_fams)
+        if n_fams >= min_fam:
+            corr_mult = min(bonus_per ** (n_fams - min_fam + 1), max_bonus)
+        else:
+            corr_mult = 1.0
+
         tactics = g["TacticCategory"].unique().tolist()
         records.append({
-            entity_col: entity,
-            "EpisodeID": ep_id,
-            "StartTime": g["Timestamp"].min(),
-            "EndTime": g["Timestamp"].max(),
-            "DurationHours": round((g["Timestamp"].max() - g["Timestamp"].min()).total_seconds() / 3600, 2),
-            "SceneCount": len(g),
-            "TacticCount": len(tactics),
-            "Tactics": ", ".join(sorted(tactics)),
-            "EpisodeRiskScore": int(g["ScoreContribution"].sum()),
+            entity_col:          entity,
+            "EpisodeID":         ep_id,
+            "StartTime":         g["Timestamp"].min(),
+            "EndTime":           g["Timestamp"].max(),
+            "DurationHours":     round((g["Timestamp"].max() - g["Timestamp"].min()).total_seconds() / 3600, 2),
+            "SceneCount":        len(g),
+            "TacticCount":       len(tactics),
+            "Tactics":           ", ".join(sorted(tactics)),
+            "BehaviorFamilies":  ", ".join(sorted(unique_fams)),
+            "FamilyCount":       n_fams,
+            "CorroborationMult": round(corr_mult, 3),
+            "EpisodeRiskScore":  round(base_score * corr_mult, 2),
         })
 
     return pd.DataFrame(records).sort_values("EpisodeRiskScore", ascending=False)
@@ -366,11 +547,22 @@ def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict) 
 # Season aggregation
 # ---------------------------------------------------------------------------
 
-def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict, scenes: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate episodes into season-level summary per entity."""
+def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict, scenes: pd.DataFrame, cfg: dict = None) -> pd.DataFrame:
+    """
+    Aggregate episodes into season-level summary per entity.
+
+    TotalRisk uses diminishing-returns weighting rather than a plain sum so
+    that story quality beats story length:
+      - Episodes sorted descending by EpisodeRiskScore; each successive episode
+        earns a lower rank_weight via 1/log2(rank+2).
+      - Repeated same-dominant-family episodes decay exponentially so a device
+        with 20 identical bash episodes scores much lower than one with
+        bash + credential dump + lateral movement across a handful of episodes.
+    """
+    cfg = cfg or {}
     tactic_cols = list(tactic_weights.keys())
 
-    # Per-entity tactic score breakdown from scenes
+    # Per-entity tactic score breakdown from scenes (unchanged)
     tactic_scores = (
         scenes.groupby([entity_col, "TacticCategory"])["ScoreContribution"]
         .sum()
@@ -379,16 +571,46 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
     )
     tactic_scores.columns = [f"Score_{c}" for c in tactic_scores.columns]
 
-    ep_summary = episodes.groupby(entity_col).agg(
-        EpisodeCount=("EpisodeID", "count"),
-        TotalRisk=("EpisodeRiskScore", "sum"),
-        TotalScenes=("SceneCount", "sum"),
-        MaxEpisodeRisk=("EpisodeRiskScore", "max"),
-        FirstSeen=("StartTime", "min"),
-        LastSeen=("EndTime", "max"),
-        UniqueTactics=("TacticCount", "max"),
-    )
+    # Diminishing-returns config
+    dr_cfg       = cfg.get("season_diminishing_returns", {})
+    log_base     = dr_cfg.get("diminishing_log_base", 2.0)
+    decay_after  = dr_cfg.get("same_family_decay_after", 1)
+    decay_factor = dr_cfg.get("same_family_decay_factor", 0.5)
 
+    season_records = []
+    for entity, ep_group in episodes.groupby(entity_col):
+        ep_group = ep_group.sort_values("EpisodeRiskScore", ascending=False)
+        dom_counter: dict = {}
+        total_risk = 0.0
+        for rank, (_, ep_row) in enumerate(ep_group.iterrows()):
+            ep_score = ep_row["EpisodeRiskScore"]
+            # Dominant family = first alphabetically among the episode's families
+            raw_families = str(ep_row.get("BehaviorFamilies", ""))
+            families = [f for f in raw_families.split(", ") if f and f != "Unknown"]
+            dominant = sorted(families)[0] if families else "Unknown"
+
+            # Log-based rank weight: best episode gets 1.0, each subsequent gets less
+            rank_weight = 1.0 / math.log(rank + 2, log_base)
+
+            # Exponential decay for repeated same-dominant-family episodes
+            prior = dom_counter.get(dominant, 0)
+            family_weight = decay_factor ** max(0, prior - decay_after + 1) if prior >= decay_after else 1.0
+            dom_counter[dominant] = prior + 1
+
+            total_risk += ep_score * rank_weight * family_weight
+
+        season_records.append({
+            entity_col:       entity,
+            "TotalRisk":      round(total_risk, 1),
+            "EpisodeCount":   len(ep_group),
+            "TotalScenes":    ep_group["SceneCount"].sum(),
+            "MaxEpisodeRisk": ep_group["EpisodeRiskScore"].max(),
+            "FirstSeen":      ep_group["StartTime"].min(),
+            "LastSeen":       ep_group["EndTime"].max(),
+            "UniqueTactics":  ep_group["TacticCount"].max(),
+        })
+
+    ep_summary = pd.DataFrame(season_records).set_index(entity_col)
     seasons = ep_summary.join(tactic_scores, how="left").fillna(0)
 
     # Behavioral diversity: unique normalized evidence patterns and detection methods per entity
@@ -401,7 +623,6 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
     seasons["UniqueEvidenceCount"] = seasons["UniqueEvidenceCount"].astype(int)
     seasons["UniqueDetectionTypes"] = seasons["UniqueDetectionTypes"].astype(int)
 
-    seasons["TotalRisk"] = seasons["TotalRisk"].astype(int)
     seasons = seasons.sort_values("TotalRisk", ascending=False).reset_index()
     # Percentile rank so analysts have immediate context for raw scores
     if len(seasons) > 1:
@@ -598,7 +819,9 @@ def write_excel(
             tactic_scenes = scenes[scenes["TacticCategory"] == tactic].copy()
             tactic_scenes = tactic_scenes.sort_values("Timestamp", ascending=False)
             export_cols = ["Timestamp", "DeviceName", "AccountName", "DetectionType",
-                           "TacticCategory", "Family", "Evidence", "EnvDeviceCount",
+                           "TacticCategory", "Family", "BehaviorFamily", "TrustContext",
+                           "LolbinTrustTier", "ExecutionContext", "CommandLineRiskScore",
+                           "ContextMultiplier", "Evidence", "EnvDeviceCount",
                            "PrevalenceMultiplier", "SourceFile"]
             tactic_scenes = tactic_scenes[[c for c in export_cols if c in tactic_scenes.columns]]
             write_sheet(tactic, tactic_scenes)
@@ -606,7 +829,9 @@ def write_excel(
         # 7. All Scenes
         all_scenes = scenes.sort_values("Timestamp", ascending=False)
         export_cols = ["Timestamp", "DeviceName", "AccountName", "DetectionType",
-                       "TacticCategory", "Family", "Evidence", "EnvDeviceCount",
+                       "TacticCategory", "Family", "BehaviorFamily", "TrustContext",
+                       "LolbinTrustTier", "ExecutionContext", "CommandLineRiskScore",
+                       "ContextMultiplier", "Evidence", "EnvDeviceCount",
                        "PrevalenceMultiplier", "SourceFile"]
         all_scenes = all_scenes[[c for c in export_cols if c in all_scenes.columns]]
         write_sheet("All Scenes", all_scenes)
@@ -655,19 +880,19 @@ def main():
 
     print("\n[*] Clustering scenes into episodes (device-centric)...")
     scenes_dev = assign_episodes(scenes, episode_window, "DeviceName")
-    device_episodes = build_episodes(scenes_dev, "DeviceName", tactic_weights)
+    device_episodes = build_episodes(scenes_dev, "DeviceName", tactic_weights, cfg)
     print(f"    Episodes found: {len(device_episodes)}")
 
     print("[*] Clustering scenes into episodes (user-centric)...")
     scenes_usr = assign_episodes(scenes, episode_window, "AccountName")
-    user_episodes = build_episodes(scenes_usr, "AccountName", tactic_weights)
+    user_episodes = build_episodes(scenes_usr, "AccountName", tactic_weights, cfg)
 
     print("[*] Aggregating device seasons...")
-    device_seasons = build_seasons(device_episodes, "DeviceName", tactic_weights, scenes)
+    device_seasons = build_seasons(device_episodes, "DeviceName", tactic_weights, scenes, cfg)
     print(f"    Devices in scope: {len(device_seasons)}")
 
     print("[*] Aggregating user seasons...")
-    user_seasons = build_seasons(user_episodes, "AccountName", tactic_weights, scenes)
+    user_seasons = build_seasons(user_episodes, "AccountName", tactic_weights, scenes, cfg)
     print(f"    Users in scope: {len(user_seasons)}")
 
     print("[*] Detecting attack chains...")
