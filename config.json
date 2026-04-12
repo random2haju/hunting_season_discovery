@@ -124,6 +124,16 @@
     "same_family_decay_factor": 0.5
   },
 
+  "attack_chain_hygiene": {
+    "exclude_machine_accounts": true,
+    "excluded_accounts": [
+      "system", "network service", "local service", "anonymous logon",
+      "iusr", "iwam", "aspnet"
+    ],
+    "min_device_season_score": 0,
+    "min_unique_tactics": 0
+  },
+
   "history": {
     "enabled":                        true,
     "store_path":                     "output/hunt_history.db",
@@ -134,6 +144,6 @@
     "emerging_entity_score_threshold": 10.0,
     "emerging_entity_max_runs":       2,
     "tactic_expansion_threshold":     1,
-    "max_lookback_runs":              90
+    "max_runs_per_entity":            90
   }
 }

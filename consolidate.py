@@ -506,17 +506,23 @@ def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict, 
     for (entity, ep_id), g in grp:
         g = g.sort_values("Timestamp")
 
-        # Per-family cap: count occurrences per family; scenes beyond cap get a reduced multiplier
+        # Per-family cap: count occurrences per family; scenes beyond cap get a reduced multiplier.
+        # Also track per-family adjusted score so we can pick the dominant family by contribution,
+        # not alphabetically.
         family_counter: dict = {}
+        family_scores: dict = {}   # family -> total adjusted score (excludes "Unknown")
         adj_scores = []
         for _, row in g.iterrows():
             fam = row.get("BehaviorFamily", "Unknown")
             family_counter[fam] = family_counter.get(fam, 0) + 1
             if family_counter[fam] > family_cap:
                 over_cap_mult = family_cap_mults.get(fam, 0.2)
-                adj_scores.append(row["ScoreContribution"] * over_cap_mult)
+                adj = row["ScoreContribution"] * over_cap_mult
             else:
-                adj_scores.append(row["ScoreContribution"])
+                adj = row["ScoreContribution"]
+            adj_scores.append(adj)
+            if fam != "Unknown":
+                family_scores[fam] = family_scores.get(fam, 0.0) + adj
 
         base_score = sum(adj_scores)
 
@@ -527,6 +533,9 @@ def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict, 
             corr_mult = min(bonus_per ** (n_fams - min_fam + 1), max_bonus)
         else:
             corr_mult = 1.0
+
+        # Dominant family = highest adjusted-score contributor (not alphabetically first)
+        dominant_family = max(family_scores, key=family_scores.get) if family_scores else "Unknown"
 
         tactics = g["TacticCategory"].unique().tolist()
         records.append({
@@ -539,6 +548,7 @@ def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict, 
             "TacticCount":       len(tactics),
             "Tactics":           ", ".join(sorted(tactics)),
             "BehaviorFamilies":  ", ".join(sorted(unique_fams)),
+            "DominantFamily":    dominant_family,
             "FamilyCount":       n_fams,
             "CorroborationMult": round(corr_mult, 3),
             "EpisodeRiskScore":  round(base_score * corr_mult, 2),
@@ -581,6 +591,10 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
     decay_after  = dr_cfg.get("same_family_decay_after", 1)
     decay_factor = dr_cfg.get("same_family_decay_factor", 0.5)
 
+    # True unique tactic count = union of all TacticCategory values seen in scenes per entity,
+    # not the max TacticCount from a single episode (which under-counts multi-episode seasons).
+    entity_tactic_counts = scenes.groupby(entity_col)["TacticCategory"].nunique()
+
     season_records = []
     for entity, ep_group in episodes.groupby(entity_col):
         ep_group = ep_group.sort_values("EpisodeRiskScore", ascending=False)
@@ -588,10 +602,8 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
         total_risk = 0.0
         for rank, (_, ep_row) in enumerate(ep_group.iterrows()):
             ep_score = ep_row["EpisodeRiskScore"]
-            # Dominant family = first alphabetically among the episode's families
-            raw_families = str(ep_row.get("BehaviorFamilies", ""))
-            families = [f for f in raw_families.split(", ") if f and f != "Unknown"]
-            dominant = sorted(families)[0] if families else "Unknown"
+            # Dominant family = highest score contributor in this episode (set by build_episodes)
+            dominant = ep_row.get("DominantFamily", "Unknown") or "Unknown"
 
             # Log-based rank weight: best episode gets 1.0, each subsequent gets less
             rank_weight = 1.0 / math.log(rank + 2, log_base)
@@ -611,7 +623,8 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
             "MaxEpisodeRisk": ep_group["EpisodeRiskScore"].max(),
             "FirstSeen":      ep_group["StartTime"].min(),
             "LastSeen":       ep_group["EndTime"].max(),
-            "UniqueTactics":  ep_group["TacticCount"].max(),
+            # Union of all tactics across all episodes — correct cross-episode count
+            "UniqueTactics":  int(entity_tactic_counts.get(entity, 0)),
         })
 
     ep_summary = pd.DataFrame(season_records).set_index(entity_col)
@@ -642,14 +655,49 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
 # Attack chain detection
 # ---------------------------------------------------------------------------
 
-def build_attack_chains(device_seasons: pd.DataFrame, scenes: pd.DataFrame) -> pd.DataFrame:
+def build_attack_chains(device_seasons: pd.DataFrame, scenes: pd.DataFrame, cfg: dict = None) -> pd.DataFrame:
     """
     Link devices that share an AccountName into attack chains.
     Returns a summary of chains with pivot accounts and combined risk.
+
+    Account hygiene (config key: attack_chain_hygiene):
+    - Null/empty AccountNames are always excluded.
+    - Machine accounts (ending with $) are excluded by default.
+    - A configurable exclusion list covers common service/shared accounts.
+    - Optionally, only devices meeting minimum SeasonScore or UniqueTactics thresholds
+      are eligible for chaining, reducing noise from low-signal devices.
     """
+    cfg = cfg or {}
+    chain_cfg = cfg.get("attack_chain_hygiene", {})
+    exclude_machine  = chain_cfg.get("exclude_machine_accounts", True)
+    excluded_accounts = {a.lower() for a in chain_cfg.get("excluded_accounts", [])}
+    min_chain_score   = float(chain_cfg.get("min_device_season_score", 0))
+    min_chain_tactics = int(chain_cfg.get("min_unique_tactics", 0))
+
+    # Work on a filtered copy so we don't mutate the scenes DataFrame used elsewhere
+    chain_scenes = scenes[
+        scenes["AccountName"].notna() & scenes["AccountName"].ne("")
+    ].copy()
+
+    if exclude_machine:
+        chain_scenes = chain_scenes[~chain_scenes["AccountName"].str.endswith("$")]
+
+    if excluded_accounts:
+        chain_scenes = chain_scenes[
+            ~chain_scenes["AccountName"].str.lower().isin(excluded_accounts)
+        ]
+
+    # Restrict to devices that meet the minimum signal thresholds (if configured)
+    if min_chain_score > 0 or min_chain_tactics > 0:
+        eligible = device_seasons[
+            (device_seasons["TotalRisk"] >= min_chain_score) &
+            (device_seasons["UniqueTactics"] >= min_chain_tactics)
+        ]["DeviceName"]
+        chain_scenes = chain_scenes[chain_scenes["DeviceName"].isin(eligible)]
+
     # Build map: account -> set of devices
     account_devices = (
-        scenes.groupby("AccountName")["DeviceName"]
+        chain_scenes.groupby("AccountName")["DeviceName"]
         .apply(lambda x: set(x.tolist()))
         .reset_index()
     )
@@ -682,8 +730,8 @@ def build_attack_chains(device_seasons: pd.DataFrame, scenes: pd.DataFrame) -> p
         for d in devices[1:]:
             union(devices[0], d)
 
-    # Group devices by chain root
-    all_devices = scenes["DeviceName"].unique().tolist()
+    # Group devices by chain root (eligible devices only)
+    all_devices = chain_scenes["DeviceName"].unique().tolist()
     chain_map = {}
     for d in all_devices:
         root = find(d)
@@ -743,7 +791,9 @@ def load_history(cfg: dict) -> pd.DataFrame:
     store_path = _resolve_store_path(cfg)
     if not os.path.exists(store_path):
         return empty
-    max_runs = int(hist_cfg.get("max_lookback_runs", 90))
+    # max_runs_per_entity: how many of the most-recent runs to load per entity.
+    # Accepts the new key; falls back to the old name for backward compatibility.
+    max_runs = int(hist_cfg.get("max_runs_per_entity", hist_cfg.get("max_lookback_runs", 90)))
     try:
         con = sqlite3.connect(store_path)
         tbl = con.execute(
@@ -953,6 +1003,7 @@ def compute_historical_baselines(
     min_runs        = int(hist_cfg.get("minimum_runs_for_baseline", 3))
     spike_mult      = float(hist_cfg.get("score_spike_multiplier", 2.5))
     spike_min_mean  = float(hist_cfg.get("score_spike_min_mean", 1.0))
+    zscore_threshold = float(hist_cfg.get("zscore_threshold", 2.0))
     emerg_thresh    = float(hist_cfg.get("emerging_entity_score_threshold", 10.0))
     emerg_max_runs  = int(hist_cfg.get("emerging_entity_max_runs", 2))
     tactic_exp      = int(hist_cfg.get("tactic_expansion_threshold", 1))
@@ -963,7 +1014,7 @@ def compute_historical_baselines(
     for col in ["PreviousScore", "BaselineMean", "BaselineMedian", "BaselineStdDev",
                 "HistoricalMax", "RunCount", "ScoreDelta", "ScoreDeltaPct", "ZScore"]:
         seasons[col] = float("nan")
-    for col in ["IsNewHigh", "IsScoreSpike", "IsEmergingEntity", "IsTacticExpansion"]:
+    for col in ["IsNewHigh", "IsScoreSpike", "IsZScoreAnomaly", "IsEmergingEntity", "IsTacticExpansion"]:
         seasons[col] = False
 
     if history.empty:
@@ -1025,6 +1076,11 @@ def compute_historical_baselines(
             seasons.at[idx, "IsScoreSpike"] = bool(
                 current_score > base_mean * spike_mult and base_mean >= spike_min_mean
             )
+            # IsZScoreAnomaly: statistical anomaly regardless of multiplier — fires when
+            # the entity's score is zscore_threshold standard deviations above its mean.
+            # base_std == 0 is safe: zscore was set to 0.0, so this will never fire (correct
+            # behaviour — a perfectly flat baseline is not anomalous).
+            seasons.at[idx, "IsZScoreAnomaly"] = bool(zscore >= zscore_threshold)
             hist_tactics_max = int(ent_hist["UniqueTactics"].max())
             seasons.at[idx, "IsTacticExpansion"] = bool(
                 current_tactics > hist_tactics_max + tactic_exp - 1
@@ -1050,7 +1106,8 @@ def _compute_priority(row: "pd.Series") -> float:
         (3.0 if row.get("IsScoreSpike") else 0.0) +
         (2.0 if row.get("IsNewHigh") else 0.0) +
         (2.5 if row.get("IsTacticExpansion") else 0.0) +
-        (1.5 if row.get("IsEmergingEntity") else 0.0)
+        (1.5 if row.get("IsEmergingEntity") else 0.0) +
+        (1.0 if row.get("IsZScoreAnomaly") else 0.0)   # additive: Z already in base, this rewards it
     )
     total_risk = float(row.get("TotalRisk") or 0)
     dampener = math.log10(total_risk + 1) / math.log10(101)
@@ -1065,12 +1122,12 @@ def generate_historical_anomalies(
     Collect all entities where any anomaly flag is True, compute HistoricalPriority,
     and return sorted by priority descending.
     """
-    flag_cols = ["IsNewHigh", "IsScoreSpike", "IsEmergingEntity", "IsTacticExpansion"]
+    flag_cols = ["IsNewHigh", "IsScoreSpike", "IsZScoreAnomaly", "IsEmergingEntity", "IsTacticExpansion"]
     output_cols = [
         "EntityType", "EntityName", "TotalRisk", "HistoricalPriority",
         "PreviousScore", "ScoreDelta", "ScoreDeltaPct", "ZScore",
         "BaselineMean", "BaselineStdDev", "HistoricalMax", "RunCount",
-        "IsNewHigh", "IsScoreSpike", "IsEmergingEntity", "IsTacticExpansion",
+        "IsNewHigh", "IsScoreSpike", "IsZScoreAnomaly", "IsEmergingEntity", "IsTacticExpansion",
     ]
 
     def _prep(df, entity_type, entity_col):
@@ -1287,7 +1344,7 @@ def main():
     print(f"    Users in scope: {len(user_seasons)}")
 
     print("[*] Detecting attack chains...")
-    attack_chains = build_attack_chains(device_seasons, scenes)
+    attack_chains = build_attack_chains(device_seasons, scenes, cfg)
     print(f"    Chains detected: {len(attack_chains)}")
 
     # --- Historical analysis ---
