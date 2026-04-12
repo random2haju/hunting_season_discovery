@@ -17,14 +17,18 @@ import json
 import math
 import os
 import re
+import sqlite3
 import sys
+import uuid
 import warnings
+from collections import Counter
 from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
 
 REQUIRED_COLUMNS = {"Timestamp", "DeviceName", "AccountName", "DetectionType", "TacticCategory", "Evidence"}
+HISTORY_OUTPUT_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -712,6 +716,388 @@ def build_attack_chains(device_seasons: pd.DataFrame, scenes: pd.DataFrame) -> p
 
 
 # ---------------------------------------------------------------------------
+# Historical score persistence
+# ---------------------------------------------------------------------------
+
+_HISTORY_COLS = [
+    "RunId", "RunTimestamp", "RunTimestampEpoch", "OutputVersion",
+    "EntityType", "EntityName", "SeasonScore", "EpisodeCount",
+    "SceneCount", "UniqueTactics", "BehaviorFamilyCount", "TopBehaviorFamily",
+    "HasMDEAlert", "CrossDeviceLink", "TopEpisodeScore", "TopTactic",
+]
+
+
+def _resolve_store_path(cfg: dict) -> str:
+    hist_cfg = cfg.get("history", {})
+    raw = hist_cfg.get("store_path", "output/hunt_history.db")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, raw)
+
+
+def load_history(cfg: dict) -> pd.DataFrame:
+    """Load hunt_history from SQLite. Returns empty DataFrame on first run or if disabled."""
+    empty = pd.DataFrame(columns=_HISTORY_COLS)
+    hist_cfg = cfg.get("history", {})
+    if not hist_cfg.get("enabled", True):
+        return empty
+    store_path = _resolve_store_path(cfg)
+    if not os.path.exists(store_path):
+        return empty
+    max_runs = int(hist_cfg.get("max_lookback_runs", 90))
+    try:
+        con = sqlite3.connect(store_path)
+        tbl = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='hunt_history'"
+        ).fetchone()
+        if tbl is None:
+            con.close()
+            return empty
+        if max_runs > 0:
+            sql = """
+                SELECT *
+                FROM hunt_history
+                WHERE (EntityType || '|' || EntityName || '|' || RunTimestampEpoch) IN (
+                    SELECT EntityType || '|' || EntityName || '|' || RunTimestampEpoch
+                    FROM (
+                        SELECT EntityType, EntityName, RunTimestampEpoch,
+                               DENSE_RANK() OVER (
+                                   PARTITION BY EntityType, EntityName
+                                   ORDER BY RunTimestampEpoch DESC
+                               ) AS rn
+                        FROM hunt_history
+                    )
+                    WHERE rn <= ?
+                )
+                ORDER BY EntityType, EntityName, RunTimestampEpoch ASC
+            """
+            df = pd.read_sql(sql, con, params=(max_runs,))
+        else:
+            df = pd.read_sql(
+                "SELECT * FROM hunt_history ORDER BY EntityType, EntityName, RunTimestampEpoch ASC",
+                con,
+            )
+        con.close()
+        return df
+    except Exception as exc:
+        print(f"  [WARN] Could not load history from {store_path}: {exc}")
+        return empty
+
+
+def _build_history_row(
+    row: "pd.Series",
+    entity_type: str,
+    entity_col: str,
+    run_id: str,
+    run_ts: datetime,
+    episodes_df: "pd.DataFrame",
+    scenes: "pd.DataFrame",
+    attack_chains: "pd.DataFrame",
+    cfg: dict,
+) -> dict:
+    """Build one history record dict from a season row."""
+    entity_name = row[entity_col]
+
+    # BehaviorFamily derivation from episodes
+    ent_eps = episodes_df[episodes_df[entity_col] == entity_name]
+    all_families: list = []
+    for bf_str in ent_eps["BehaviorFamilies"].dropna():
+        all_families.extend(
+            f.strip() for f in str(bf_str).split(",")
+            if f.strip() and f.strip() != "Unknown"
+        )
+    family_counts = Counter(all_families)
+    behavior_family_count = len(family_counts)
+    top_behavior_family = family_counts.most_common(1)[0][0] if family_counts else ""
+
+    # HasMDEAlert — entity has at least one scene with a non-empty Severity
+    ent_scenes = scenes[scenes[entity_col] == entity_name]
+    if "Severity" in scenes.columns:
+        has_mde_alert = int(
+            (ent_scenes["Severity"].notna() & ent_scenes["Severity"].ne("")).any()
+        )
+    else:
+        has_mde_alert = 0
+
+    # CrossDeviceLink
+    cross_device_link = 0
+    if not attack_chains.empty:
+        if entity_type == "Device" and "Devices" in attack_chains.columns:
+            for dev_str in attack_chains["Devices"].dropna():
+                if entity_name in [d.strip() for d in str(dev_str).split(" | ")]:
+                    cross_device_link = 1
+                    break
+        elif entity_type == "User" and "PivotAccounts" in attack_chains.columns:
+            for piv_str in attack_chains["PivotAccounts"].dropna():
+                if entity_name in [p.strip() for p in str(piv_str).split(" | ")]:
+                    cross_device_link = 1
+                    break
+
+    # TopTactic
+    tactic_cols = [c for c in row.index if c.startswith("Score_")]
+    top_tactic = ""
+    if tactic_cols:
+        vals = row[tactic_cols]
+        if vals.max() > 0:
+            top_tactic = vals.idxmax().replace("Score_", "")
+
+    return {
+        "RunId":               run_id,
+        "RunTimestamp":        run_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "RunTimestampEpoch":   run_ts.timestamp(),
+        "OutputVersion":       HISTORY_OUTPUT_VERSION,
+        "EntityType":          entity_type,
+        "EntityName":          entity_name,
+        "SeasonScore":         float(row["TotalRisk"]),
+        "EpisodeCount":        int(row["EpisodeCount"]),
+        "SceneCount":          int(row["TotalScenes"]),
+        "UniqueTactics":       int(row["UniqueTactics"]),
+        "BehaviorFamilyCount": behavior_family_count,
+        "TopBehaviorFamily":   top_behavior_family,
+        "HasMDEAlert":         has_mde_alert,
+        "CrossDeviceLink":     cross_device_link,
+        "TopEpisodeScore":     float(row["MaxEpisodeRisk"]),
+        "TopTactic":           top_tactic,
+    }
+
+
+def append_to_history(
+    device_seasons: "pd.DataFrame",
+    user_seasons: "pd.DataFrame",
+    device_episodes: "pd.DataFrame",
+    user_episodes: "pd.DataFrame",
+    scenes: "pd.DataFrame",
+    attack_chains: "pd.DataFrame",
+    run_id: str,
+    run_ts: datetime,
+    cfg: dict,
+) -> None:
+    """Append current run records to the SQLite history store. Creates DB on first call."""
+    hist_cfg = cfg.get("history", {})
+    if not hist_cfg.get("enabled", True):
+        return
+    store_path = _resolve_store_path(cfg)
+    os.makedirs(os.path.dirname(store_path), exist_ok=True)
+
+    records = []
+    for _, row in device_seasons.iterrows():
+        records.append(_build_history_row(
+            row, "Device", "DeviceName", run_id, run_ts,
+            device_episodes, scenes, attack_chains, cfg,
+        ))
+    for _, row in user_seasons.iterrows():
+        records.append(_build_history_row(
+            row, "User", "AccountName", run_id, run_ts,
+            user_episodes, scenes, attack_chains, cfg,
+        ))
+    if not records:
+        return
+
+    df_write = pd.DataFrame(records)
+    # Only write the schema columns (exclude any extra baseline cols on seasons)
+    df_write = df_write[[c for c in _HISTORY_COLS if c in df_write.columns]]
+
+    con = sqlite3.connect(store_path)
+    try:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS hunt_history (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                RunId               TEXT    NOT NULL,
+                RunTimestamp        TEXT    NOT NULL,
+                RunTimestampEpoch   REAL    NOT NULL,
+                OutputVersion       INTEGER NOT NULL DEFAULT 1,
+                EntityType          TEXT    NOT NULL,
+                EntityName          TEXT    NOT NULL,
+                SeasonScore         REAL    NOT NULL,
+                EpisodeCount        INTEGER NOT NULL,
+                SceneCount          INTEGER NOT NULL,
+                UniqueTactics       INTEGER NOT NULL,
+                BehaviorFamilyCount INTEGER NOT NULL,
+                TopBehaviorFamily   TEXT    NOT NULL DEFAULT '',
+                HasMDEAlert         INTEGER NOT NULL DEFAULT 0,
+                CrossDeviceLink     INTEGER NOT NULL DEFAULT 0,
+                TopEpisodeScore     REAL    NOT NULL,
+                TopTactic           TEXT    NOT NULL DEFAULT ''
+            )
+        """)
+        con.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entity
+            ON hunt_history (EntityType, EntityName, RunTimestampEpoch DESC)
+        """)
+        con.execute("""
+            CREATE INDEX IF NOT EXISTS idx_run ON hunt_history (RunId)
+        """)
+        df_write.to_sql("hunt_history", con, if_exists="append", index=False,
+                        method="multi", chunksize=500)
+        con.commit()
+        print(f"  [HISTORY] Appended {len(records)} record(s) (RunId: {run_id[:8]}...)")
+    except Exception as exc:
+        print(f"  [WARN] Failed to write history to {store_path}: {exc}")
+        try:
+            con.rollback()
+        except Exception:
+            pass
+    finally:
+        con.close()
+
+
+def compute_historical_baselines(
+    current_seasons: "pd.DataFrame",
+    history: "pd.DataFrame",
+    entity_col: str,
+    entity_type: str,
+    current_run_id: str,
+    cfg: dict,
+) -> "pd.DataFrame":
+    """Enrich current_seasons with historical baseline columns computed from prior runs only."""
+    hist_cfg = cfg.get("history", {})
+    min_runs        = int(hist_cfg.get("minimum_runs_for_baseline", 3))
+    spike_mult      = float(hist_cfg.get("score_spike_multiplier", 2.5))
+    spike_min_mean  = float(hist_cfg.get("score_spike_min_mean", 1.0))
+    emerg_thresh    = float(hist_cfg.get("emerging_entity_score_threshold", 10.0))
+    emerg_max_runs  = int(hist_cfg.get("emerging_entity_max_runs", 2))
+    tactic_exp      = int(hist_cfg.get("tactic_expansion_threshold", 1))
+
+    seasons = current_seasons.copy()
+
+    # Pre-populate baseline columns
+    for col in ["PreviousScore", "BaselineMean", "BaselineMedian", "BaselineStdDev",
+                "HistoricalMax", "RunCount", "ScoreDelta", "ScoreDeltaPct", "ZScore"]:
+        seasons[col] = float("nan")
+    for col in ["IsNewHigh", "IsScoreSpike", "IsEmergingEntity", "IsTacticExpansion"]:
+        seasons[col] = False
+
+    if history.empty:
+        emerg_mask = seasons["TotalRisk"] >= emerg_thresh
+        seasons.loc[emerg_mask, "IsEmergingEntity"] = True
+        seasons.loc[emerg_mask, "RunCount"] = 0
+        return seasons
+
+    prior = history[
+        (history["EntityType"] == entity_type) &
+        (history["RunId"] != current_run_id)
+    ].copy()
+
+    if prior.empty:
+        emerg_mask = seasons["TotalRisk"] >= emerg_thresh
+        seasons.loc[emerg_mask, "IsEmergingEntity"] = True
+        seasons.loc[emerg_mask, "RunCount"] = 0
+        return seasons
+
+    prior_grouped = prior.groupby("EntityName")
+
+    for idx, row in seasons.iterrows():
+        entity_name = row[entity_col]
+
+        if entity_name not in prior_grouped.groups:
+            seasons.at[idx, "RunCount"] = 0
+            if float(row["TotalRisk"]) >= emerg_thresh:
+                seasons.at[idx, "IsEmergingEntity"] = True
+            continue
+
+        ent_hist = prior_grouped.get_group(entity_name).sort_values("RunTimestampEpoch")
+        scores = ent_hist["SeasonScore"].to_numpy(dtype=float)
+        run_count = len(scores)
+        current_score = float(row["TotalRisk"])
+        current_tactics = int(row["UniqueTactics"])
+
+        prev_score    = float(scores[-1])
+        base_mean     = float(scores.mean())
+        base_median   = float(np.median(scores))
+        base_std      = float(scores.std(ddof=0))   # 0.0 when n=1
+        hist_max      = float(scores.max())
+
+        score_delta   = current_score - prev_score
+        score_delta_pct = (score_delta / prev_score * 100) if prev_score != 0 else float("nan")
+        zscore        = (current_score - base_mean) / base_std if base_std > 0 else 0.0
+
+        seasons.at[idx, "PreviousScore"]  = prev_score
+        seasons.at[idx, "BaselineMean"]   = round(base_mean, 2)
+        seasons.at[idx, "BaselineMedian"] = round(base_median, 2)
+        seasons.at[idx, "BaselineStdDev"] = round(base_std, 2)
+        seasons.at[idx, "HistoricalMax"]  = hist_max
+        seasons.at[idx, "RunCount"]       = run_count
+        seasons.at[idx, "ScoreDelta"]     = round(score_delta, 2)
+        seasons.at[idx, "ScoreDeltaPct"]  = round(score_delta_pct, 1) if pd.notna(score_delta_pct) else float("nan")
+        seasons.at[idx, "ZScore"]         = round(zscore, 2)
+
+        if run_count >= min_runs:
+            seasons.at[idx, "IsNewHigh"] = bool(current_score > hist_max)
+            seasons.at[idx, "IsScoreSpike"] = bool(
+                current_score > base_mean * spike_mult and base_mean >= spike_min_mean
+            )
+            hist_tactics_max = int(ent_hist["UniqueTactics"].max())
+            seasons.at[idx, "IsTacticExpansion"] = bool(
+                current_tactics > hist_tactics_max + tactic_exp - 1
+            )
+
+        seasons.at[idx, "IsEmergingEntity"] = bool(
+            run_count <= emerg_max_runs and current_score >= emerg_thresh
+        )
+
+    return seasons
+
+
+def _compute_priority(row: "pd.Series") -> float:
+    """
+    HistoricalPriority = (clamp(ZScore,0,10) + flag_bonuses) * log-dampener
+
+    Bonuses: IsScoreSpike=3, IsNewHigh=2, IsTacticExpansion=2.5, IsEmergingEntity=1.5
+    Dampener: log10(TotalRisk+1)/log10(101)  — suppresses trivially-low absolute scores.
+    """
+    zscore = float(row.get("ZScore") or 0)
+    base = max(0.0, min(zscore, 10.0))
+    bonuses = (
+        (3.0 if row.get("IsScoreSpike") else 0.0) +
+        (2.0 if row.get("IsNewHigh") else 0.0) +
+        (2.5 if row.get("IsTacticExpansion") else 0.0) +
+        (1.5 if row.get("IsEmergingEntity") else 0.0)
+    )
+    total_risk = float(row.get("TotalRisk") or 0)
+    dampener = math.log10(total_risk + 1) / math.log10(101)
+    return round((base + bonuses) * dampener, 2)
+
+
+def generate_historical_anomalies(
+    device_seasons: "pd.DataFrame",
+    user_seasons: "pd.DataFrame",
+) -> "pd.DataFrame":
+    """
+    Collect all entities where any anomaly flag is True, compute HistoricalPriority,
+    and return sorted by priority descending.
+    """
+    flag_cols = ["IsNewHigh", "IsScoreSpike", "IsEmergingEntity", "IsTacticExpansion"]
+    output_cols = [
+        "EntityType", "EntityName", "TotalRisk", "HistoricalPriority",
+        "PreviousScore", "ScoreDelta", "ScoreDeltaPct", "ZScore",
+        "BaselineMean", "BaselineStdDev", "HistoricalMax", "RunCount",
+        "IsNewHigh", "IsScoreSpike", "IsEmergingEntity", "IsTacticExpansion",
+    ]
+
+    def _prep(df, entity_type, entity_col):
+        d = df.copy()
+        d["EntityType"] = entity_type
+        return d.rename(columns={entity_col: "EntityName"})
+
+    combined = pd.concat(
+        [_prep(device_seasons, "Device", "DeviceName"),
+         _prep(user_seasons, "User", "AccountName")],
+        ignore_index=True,
+    )
+
+    any_flag = combined[flag_cols].apply(
+        lambda col: col.fillna(False).astype(bool)
+    ).any(axis=1)
+    anomalies = combined[any_flag].copy()
+
+    if anomalies.empty:
+        return pd.DataFrame(columns=output_cols)
+
+    anomalies["HistoricalPriority"] = anomalies.apply(_compute_priority, axis=1)
+    anomalies = anomalies.sort_values("HistoricalPriority", ascending=False).reset_index(drop=True)
+    return anomalies[[c for c in output_cols if c in anomalies.columns]]
+
+
+# ---------------------------------------------------------------------------
 # Excel output
 # ---------------------------------------------------------------------------
 
@@ -735,6 +1121,7 @@ def write_excel(
     device_seasons: pd.DataFrame,
     user_seasons: pd.DataFrame,
     attack_chains: pd.DataFrame,
+    historical_anomalies: pd.DataFrame,
     tactic_weights: dict,
     cfg: dict,
 ):
@@ -768,7 +1155,11 @@ def write_excel(
         # 2. User Seasons
         write_sheet("User Seasons", user_seasons)
 
-        # 3. Attack Chains
+        # 3. Historical Anomalies (entities whose score changed unusually vs. their own baseline)
+        if not historical_anomalies.empty:
+            write_sheet("Historical Anomalies", historical_anomalies)
+
+        # 4. Attack Chains
         write_sheet("Attack Chains", attack_chains)
 
         # Shared prevalence multiplier function used by both stacking sheets
@@ -899,10 +1290,36 @@ def main():
     attack_chains = build_attack_chains(device_seasons, scenes)
     print(f"    Chains detected: {len(attack_chains)}")
 
+    # --- Historical analysis ---
+    run_id = str(uuid.uuid4())
+    run_ts = datetime.now(timezone.utc)
+
+    print("[*] Loading historical baselines...")
+    history = load_history(cfg)   # load BEFORE appending current run
+
+    device_seasons = compute_historical_baselines(
+        device_seasons, history, "DeviceName", "Device", run_id, cfg
+    )
+    user_seasons = compute_historical_baselines(
+        user_seasons, history, "AccountName", "User", run_id, cfg
+    )
+
+    historical_anomalies = generate_historical_anomalies(device_seasons, user_seasons)
+    if not historical_anomalies.empty:
+        print(f"  [HISTORY] {len(historical_anomalies)} historical anomaly flag(s) detected")
+
+    append_to_history(
+        device_seasons, user_seasons,
+        device_episodes, user_episodes,
+        scenes, attack_chains,
+        run_id, run_ts, cfg,
+    )
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = os.path.join(out_dir, f"threat_hunt_{timestamp}.xlsx")
     print(f"\n[*] Writing Excel workbook...")
-    write_excel(output_path, scenes, device_episodes, device_seasons, user_seasons, attack_chains, tactic_weights, cfg)
+    write_excel(output_path, scenes, device_episodes, device_seasons, user_seasons,
+                attack_chains, historical_anomalies, tactic_weights, cfg)
 
     # Summary to console
     print("\n" + "="*60)

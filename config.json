@@ -122,5 +122,18 @@
     "diminishing_log_base":     2.0,
     "same_family_decay_after":  1,
     "same_family_decay_factor": 0.5
+  },
+
+  "history": {
+    "enabled":                        true,
+    "store_path":                     "output/hunt_history.db",
+    "minimum_runs_for_baseline":      3,
+    "score_spike_multiplier":         2.5,
+    "score_spike_min_mean":           1.0,
+    "zscore_threshold":               2.0,
+    "emerging_entity_score_threshold": 10.0,
+    "emerging_entity_max_runs":       2,
+    "tactic_expansion_threshold":     1,
+    "max_lookback_runs":              90
   }
 }

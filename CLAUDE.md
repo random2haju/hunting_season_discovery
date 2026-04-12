@@ -79,7 +79,31 @@ New tactic categories not already in `config.json` will score as 1 and log a war
 | `episode_family_cap_multipliers` | Per-family over-cap multiplier (e.g. `ShellExecution`=0.15). High-value families like CredentialDump default to 1.0 (no reduction). |
 | `corroboration_bonus` | Reward episodes that mix behavior families. `min_families_for_bonus`=2, `bonus_per_additional_family`=1.4 (2 families → 1.4×, 3 → 1.96×), `max_bonus_multiplier`=5.0. |
 | `season_diminishing_returns` | Controls the season TotalRisk formula. `diminishing_log_base`=2.0 (rank weight = 1/log2(rank+2)), `same_family_decay_after`=1, `same_family_decay_factor`=0.5 (2nd same-family episode = 0.5×, 3rd = 0.25×). |
+| `history.enabled` | Toggle historical analysis on/off (default true). When false the script behaves exactly as before this feature was added. |
+| `history.store_path` | Path to the SQLite history file relative to the script directory (default `output/hunt_history.db`). |
+| `history.minimum_runs_for_baseline` | Minimum prior runs required before IsNewHigh / IsScoreSpike / IsTacticExpansion can fire (default 3). Prevents noisy flags from thin baselines. |
+| `history.score_spike_multiplier` | Current score must exceed `mean × multiplier` to trigger IsScoreSpike (default 2.5). |
+| `history.score_spike_min_mean` | Baseline mean must be at least this value for IsScoreSpike to fire (default 1.0). Suppresses false positives from near-zero baselines. |
+| `history.zscore_threshold` | Z-score above this value is considered anomalous; informational only — the HistoricalPriority formula uses ZScore directly. |
+| `history.emerging_entity_score_threshold` | Score threshold for IsEmergingEntity flag (default 10.0). |
+| `history.emerging_entity_max_runs` | Entity must have appeared in ≤ this many prior runs to be flagged as emerging (default 2). |
+| `history.tactic_expansion_threshold` | Current UniqueTactics must exceed historical max by at least this delta to trigger IsTacticExpansion (default 1). |
+| `history.max_lookback_runs` | Limit how many prior runs per entity are loaded for baseline calculation (default 90, 0=unlimited). |
+
+## Historical score persistence
+
+After each run the script appends one record per device and user to `output/hunt_history.db` (SQLite). On the next run this baseline is loaded, and Device Seasons / User Seasons gain extra columns:
+
+`PreviousScore`, `BaselineMean`, `BaselineMedian`, `BaselineStdDev`, `HistoricalMax`, `RunCount`, `ScoreDelta`, `ScoreDeltaPct`, `ZScore`, `IsNewHigh`, `IsScoreSpike`, `IsEmergingEntity`, `IsTacticExpansion`
+
+A **Historical Anomalies** sheet (3rd in the workbook, before Attack Chains) surfaces entities where any flag is True, sorted by `HistoricalPriority` — a formula that rewards relative change weighted by absolute score magnitude.
+
+**First run**: no history exists, DB is created automatically, all flags are False (except `IsEmergingEntity` for entities above the score threshold).
+
+**If config scoring weights change significantly** (e.g. tactic weight increase), the existing baseline will produce inflated Z-scores for all entities. In that case, reset the baseline by deleting `output/hunt_history.db` or pointing `history.store_path` to a new file.
+
+**Schema upgrades**: back up `hunt_history.db` before deploying script changes that modify the history schema. The `OutputVersion` constant in the script tracks schema versions.
 
 ## What stays out of git
 
-`data/*.csv` and `output/*.xlsx` are gitignored — hunt results may contain sensitive telemetry and should never be committed.
+`data/*.csv`, `output/*.xlsx`, and `output/*.db` are gitignored — hunt results may contain sensitive telemetry and should never be committed.
