@@ -1,0 +1,104 @@
+// ============================================================
+// C2 Beaconing Detection
+// TacticCategory: CommandAndControl
+// Source: DeviceNetworkEvents
+//
+// Detects non-browser processes making repeated outbound connections
+// to the same remote IP, spread across multiple hours — a pattern
+// consistent with C2 implant check-ins (beacon intervals).
+//
+// Two conditions must both hold:
+//   1. 5+ ConnectionSuccess events to the same RemoteIP from one process
+//   2. Connections span at least 2 distinct hours (rules out burst downloads
+//      where all connections fire within seconds)
+//
+// FP Reduction:
+//   - hunt_window:          only report events within this recent period
+//   - baseline_window:      total lookback including baseline period
+//   - prevalence_threshold: suppress patterns seen on > N devices
+//   - First-seen:           suppress patterns already seen in baseline
+//   - Extensive process exclusion list for known-good beaconers
+//     (browsers, telemetry, update agents, EDR sensors, etc.)
+//
+// Tuning notes:
+//   - Raise min_connection_count if too noisy (e.g. 10)
+//   - Raise min_distinct_hours to require a longer observed window
+//   - Add corporate proxy / update server IPs to excluded_remote_ips
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+let min_connection_count = 5;
+let min_distinct_hours   = 2;
+
+// Well-known processes that make legitimate periodic outbound connections
+let excluded_processes = dynamic([
+    // Browsers
+    "chrome.exe", "msedge.exe", "firefox.exe", "iexplore.exe", "opera.exe", "brave.exe",
+    // Windows system / telemetry
+    "svchost.exe", "lsass.exe", "services.exe", "wininit.exe", "smss.exe",
+    "wuauclt.exe", "usoclient.exe", "musnotification.exe", "backgroundtaskhost.exe",
+    "MoUsoCoreWorker.exe", "WaasMedic.exe",
+    // Microsoft 365 / Teams / OneDrive
+    "teams.exe", "ms-teams.exe", "onedrive.exe", "outlook.exe", "msedgewebview2.exe",
+    "officeclicktorun.exe", "appvshnotify.exe",
+    // AV / EDR sensors
+    "mssense.exe", "msmpeng.exe", "nissrv.exe", "mpcmdrun.exe",
+    "sense.exe", "cb.exe", "CylanceSvc.exe",
+    // Developer / cloud tooling
+    "code.exe", "cursor.exe", "node.exe", "git.exe", "gh.exe",
+    "awscli.exe", "az.exe", "gcloud.exe",
+    // Backup / management
+    "ccmexec.exe", "sccm.exe", "dfsr.exe"
+]);
+
+let all_suspicious = materialize(
+    DeviceNetworkEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType == "ConnectionSuccess"
+    | where RemotePort !in (80, 443)
+        or (RemotePort in (80, 443)
+            and InitiatingProcessFileName !in~ (excluded_processes))
+    | where InitiatingProcessFileName !in~ (excluded_processes)
+    | where isnotempty(RemoteIP)
+    | where InitiatingProcessAccountName !endswith "$"
+    // Group by device + process + destination to detect repeated check-ins
+    | summarize
+        ConnectionCount  = count(),
+        DistinctHours    = dcount(bin(Timestamp, 1h)),
+        FirstSeen        = min(Timestamp),
+        SamplePort       = take_any(RemotePort),
+        AccountName      = take_any(InitiatingProcessAccountName),
+        RemoteUrl        = take_any(RemoteUrl)
+        by DeviceName, InitiatingProcessFileName, RemoteIP
+    | where ConnectionCount >= min_connection_count
+    | where DistinctHours   >= min_distinct_hours
+    | extend Dest    = iff(isnotempty(RemoteUrl), RemoteUrl, RemoteIP)
+    | extend Evidence = strcat(
+        "Beaconer: ",        InitiatingProcessFileName,
+        " | Dest: ",         Dest,
+        " | ConnectionCount: ", tostring(ConnectionCount),
+        " | DistinctHours: ",   tostring(DistinctHours),
+        " | Port: ",         tostring(SamplePort)
+    )
+    | extend Timestamp = FirstSeen
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType  = "C2 Beaconing",
+        TacticCategory = "CommandAndControl",
+        Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

@@ -1,27 +1,47 @@
 {
   "tactic_weights": {
-    "CredentialAccess": 10,
-    "LateralMovement": 8,
-    "DefenseEvasion": 8,
-    "Execution": 2,
-    "Persistence": 5,
-    "Discovery": 3,
-    "Exfiltration": 9
+    "CredentialAccess":   10,
+    "LateralMovement":     8,
+    "DefenseEvasion":      8,
+    "CommandAndControl":   9,
+    "Impact":             10,
+    "Execution":           2,
+    "Persistence":         5,
+    "Discovery":           3,
+    "Exfiltration":        9
   },
+  "tactic_transitions": {
+    "pairs": [
+      {"tactics": ["Execution",        "Discovery"],         "multiplier": 1.2},
+      {"tactics": ["Execution",        "CredentialAccess"],  "multiplier": 1.3},
+      {"tactics": ["Execution",        "Persistence"],       "multiplier": 1.2},
+      {"tactics": ["Execution",        "DefenseEvasion"],    "multiplier": 1.2},
+      {"tactics": ["Discovery",        "CredentialAccess"],  "multiplier": 1.3},
+      {"tactics": ["Discovery",        "LateralMovement"],   "multiplier": 1.3},
+      {"tactics": ["CredentialAccess", "LateralMovement"],   "multiplier": 1.5},
+      {"tactics": ["LateralMovement",  "Exfiltration"],      "multiplier": 1.5},
+      {"tactics": ["LateralMovement",  "CommandAndControl"], "multiplier": 1.4},
+      {"tactics": ["Persistence",      "DefenseEvasion"],    "multiplier": 1.3}
+    ],
+    "max_multiplier": 2.0
+  },
+
   "detection_type_multipliers": {
-    "LSASS Memory Dump": 1.5,
-    "LSASS Handle Open": 1.2,
-    "Mimikatz Execution": 2.0,
+    "LSASS Memory Dump":          1.5,
+    "LSASS Handle Open":          1.2,
+    "Mimikatz Execution":         2.0,
     "Scheduled Task Persistence": 1.1,
-    "Startup Folder Drop": 1.2,
-    "AV Exclusion Added": 1.5,
-    "Log Cleared": 1.3,
-    "Security Service Disabled": 1.5,
-    "Shadow Copy Deleted": 2.0,
-    "AI Data Exfiltration": 1.8,
-    "AI API Key Read": 1.5,
-    "Jupyter Shell Execution": 1.3,
-    "AI Agent Memory Write": 1.2
+    "Startup Folder Drop":        1.2,
+    "AV Exclusion Added":         1.5,
+    "Log Cleared":                1.3,
+    "Security Service Disabled":  1.5,
+    "Shadow Copy Deleted":        2.0,
+    "AI Data Exfiltration":       1.8,
+    "AI API Key Read":            1.5,
+    "Jupyter Shell Execution":    1.3,
+    "AI Agent Memory Write":      1.2,
+    "Network Port Scan":          1.4,
+    "C2 Beaconing":               1.8
   },
   "detection_families": {
     "AI Data Exfiltration":    "AI",
@@ -83,6 +103,7 @@
   "behavior_families": {
     "LOLBin Execution":          "ShellExecution",
     "Discovery Command":         "NetworkRecon",
+    "Network Port Scan":         "NetworkRecon",
     "LSASS Access":              "CredentialDump",
     "LSASS Memory Dump":         "CredentialDump",
     "LSASS Handle Open":         "CredentialDump",
@@ -101,17 +122,19 @@
     "AI Data Exfiltration":      "DataExfiltration",
     "AI API Key Read":           "CredentialDump",
     "Jupyter Shell Execution":   "ShellExecution",
-    "Shadow AI Tooling":         "ShellExecution"
+    "Shadow AI Tooling":         "ShellExecution",
+    "C2 Beaconing":              "CommandAndControl"
   },
   "episode_family_cap": 3,
   "episode_family_cap_multipliers": {
-    "ShellExecution":   0.15,
-    "NetworkRecon":     0.3,
-    "Persistence":      0.5,
-    "LateralMovement":  1.0,
-    "CredentialDump":   1.0,
-    "DataExfiltration": 1.0,
-    "DefenseEvasion":   1.0
+    "ShellExecution":    0.15,
+    "NetworkRecon":      0.3,
+    "Persistence":       0.5,
+    "LateralMovement":   1.0,
+    "CredentialDump":    1.0,
+    "DataExfiltration":  1.0,
+    "DefenseEvasion":    1.0,
+    "CommandAndControl": 1.0
   },
   "corroboration_bonus": {
     "min_families_for_bonus":      2,
@@ -131,7 +154,8 @@
       "iusr", "iwam", "aspnet"
     ],
     "min_device_season_score": 0,
-    "min_unique_tactics": 0
+    "min_unique_tactics": 0,
+    "fan_out_threshold": 3
   },
 
   "history": {

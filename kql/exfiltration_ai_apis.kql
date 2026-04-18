@@ -61,7 +61,6 @@ let all_suspicious = materialize(
     | where Timestamp > ago(baseline_window)
     | where ActionType == "ConnectionSuccess"
     | where RemoteUrl has_any (ai_api_domains)
-        or RemoteIP has_any (ai_api_domains)
     | where RemotePort == 443
     // Exclude browsers
     | where InitiatingProcessFileName !in~ (browser_processes)

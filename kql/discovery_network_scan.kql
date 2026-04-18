@@ -1,0 +1,81 @@
+// ============================================================
+// Network Port Scanning — Lateral Movement Reconnaissance
+// TacticCategory: Discovery
+// Source: DeviceNetworkEvents
+//
+// Detects a single process making failed connection attempts to
+// the same lateral-movement port (SMB 445, RDP 3389, WinRM 5985/5986)
+// across 3+ distinct destination IPs — a classic host-discovery sweep
+// before lateral movement.
+//
+// Signal: ActionType == "ConnectionFailed" is used because successful
+// connections to these ports are common in managed environments (e.g.
+// backup agents, patch management). Failed connections to multiple hosts
+// indicate scanning without established remote access.
+//
+// FP Reduction:
+//   - hunt_window:          only report events within this recent period
+//   - baseline_window:      total lookback including baseline period
+//   - prevalence_threshold: suppress patterns seen on > N devices
+//   - First-seen:           suppress patterns this device already had in baseline
+//   - Known admin tools excluded by process name
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+
+// Lateral-movement ports of interest
+let scan_ports = dynamic([445, 3389, 5985, 5986]);
+
+// Known management / system processes that legitimately probe these ports
+let admin_processes = dynamic([
+    "sccm.exe", "ccmexec.exe", "msiexec.exe",
+    "mmc.exe", "wsmprovhost.exe",
+    "dfsr.exe", "dfsrs.exe",
+    "veeam.endpointbackup.exe", "backup.exe",
+    "svchost.exe", "lsass.exe", "services.exe", "wininit.exe"
+]);
+
+let all_suspicious = materialize(
+    DeviceNetworkEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType == "ConnectionFailed"
+    | where RemotePort in (scan_ports)
+    | where InitiatingProcessFileName !in~ (admin_processes)
+    | where InitiatingProcessAccountName !endswith "$"
+    // Summarise per device + process + port to detect sweep patterns
+    | summarize
+        TargetCount    = dcount(RemoteIP),
+        SampleTarget   = take_any(RemoteIP),
+        FirstSeen      = min(Timestamp),
+        LastSeen       = max(Timestamp),
+        AccountName    = take_any(InitiatingProcessAccountName)
+        by DeviceName, InitiatingProcessFileName, RemotePort
+    | where TargetCount >= 3
+    | extend Evidence = strcat(
+        "Scanner: ",     InitiatingProcessFileName,
+        " | DestPort: ", tostring(RemotePort),
+        " | TargetCount: ", tostring(TargetCount),
+        " | SampleTarget: ", SampleTarget
+    )
+    | extend Timestamp = FirstSeen
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType  = "Network Port Scan",
+        TacticCategory = "Discovery",
+        Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

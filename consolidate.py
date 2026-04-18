@@ -44,10 +44,37 @@ def _build_tier_lookup(cfg: dict) -> dict:
     return lookup
 
 
+# Normalise variant key names from different KQL queries into canonical forms.
+# This lets downstream code use consistent keys regardless of which query produced the row.
+_CANONICAL_KEY_MAP: dict = {
+    # Network destination (IP, URL, or domain)
+    "remoteurl":  "destination",
+    "url":        "destination",
+    "dest":       "destination",
+    "remoteip":   "destination",
+    "destip":     "destination",
+    # Registry
+    "registrykey": "registry_key",
+    "regkey":      "registry_key",
+    # Scheduled task
+    "scheduledtask": "scheduled_task",
+    "task":          "scheduled_task",
+    # Service
+    "servicename": "service_name",
+    "service":     "service_name",
+    # File hash
+    "sha256": "file_hash",
+    "md5":    "file_hash",
+    "hash":   "file_hash",
+}
+
+
 def parse_evidence_fields(evidence_str: str) -> dict:
     """
     Parse pipe-delimited 'Key: value | Key2: value2' Evidence string into a
     lowercase-key dict.  Segments without ': ' are silently ignored.
+    Keys are normalised via _CANONICAL_KEY_MAP so callers see consistent names
+    regardless of which KQL query produced the evidence string.
     """
     result = {}
     if not isinstance(evidence_str, str) or not evidence_str.strip():
@@ -55,8 +82,14 @@ def parse_evidence_fields(evidence_str: str) -> dict:
     for segment in evidence_str.split(" | "):
         if ": " in segment:
             key, _, value = segment.partition(": ")
-            result[key.strip().lower()] = value.strip()
+            k = key.strip().lower()
+            result[_CANONICAL_KEY_MAP.get(k, k)] = value.strip()
     return result
+
+
+def _extract_destination(pe: dict) -> str:
+    """Return the destination field from a parsed evidence dict, or empty string."""
+    return pe.get("destination", "")
 
 
 def classify_lolbin_tier(detection_type: str, parsed_ev: dict, tier_lookup: dict) -> str:
@@ -135,6 +168,10 @@ def load_config(path: str) -> dict:
         cfg = json.load(f)
     assert "tactic_weights" in cfg, "config.json missing 'tactic_weights'"
     assert "episode_window_hours" in cfg, "config.json missing 'episode_window_hours'"
+    log_base = cfg.get("season_diminishing_returns", {}).get("diminishing_log_base", 2.0)
+    assert log_base > 1.0, (
+        f"config.json: season_diminishing_returns.diminishing_log_base must be > 1.0 (got {log_base})"
+    )
     return cfg
 
 
@@ -244,6 +281,9 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
     # Tag each scene with its detection family (AI vs Traditional) for analyst filtering
     families = cfg.get("detection_families", {})
     scenes["Family"] = scenes["DetectionType"].map(families).fillna("Traditional")
+
+    # Extract network destination for pivot / stacking enrichment
+    scenes["SceneDestination"] = [_extract_destination(pe) for pe in parsed_evs]
 
     return scenes
 
@@ -479,6 +519,31 @@ def assign_episodes(scenes: pd.DataFrame, window_hours: float, entity_col: str) 
     return df
 
 
+def compute_transition_bonus(tactic_set: set, cfg: dict) -> "tuple[float, list[str]]":
+    """
+    Compute a multiplicative bonus for episodes whose tactic set spans one or more
+    known ATT&CK progression pairs (e.g. CredentialAccess + LateralMovement).
+
+    Pairs are defined in config.json under `tactic_transitions.pairs`.  All matching
+    pair multipliers stack multiplicatively, capped at `tactic_transitions.max_multiplier`.
+
+    Returns (multiplier, list_of_matched_pair_labels).
+    """
+    trans_cfg = cfg.get("tactic_transitions", {})
+    pairs     = trans_cfg.get("pairs", [])
+    max_mult  = float(trans_cfg.get("max_multiplier", 2.0))
+
+    multiplier   = 1.0
+    found: list  = []
+    for pair in pairs:
+        tactics = pair.get("tactics", [])
+        if len(tactics) == 2 and tactics[0] in tactic_set and tactics[1] in tactic_set:
+            multiplier *= float(pair.get("multiplier", 1.0))
+            found.append(f"{tactics[0]}\u2192{tactics[1]}")
+
+    return min(multiplier, max_mult), found
+
+
 def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict, cfg: dict = None) -> pd.DataFrame:
     """
     Aggregate scenes into episode-level summary.
@@ -516,6 +581,8 @@ def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict, 
             fam = row.get("BehaviorFamily", "Unknown")
             family_counter[fam] = family_counter.get(fam, 0) + 1
             if family_counter[fam] > family_cap:
+                if fam not in family_cap_mults and fam != "Unknown":
+                    print(f"  [WARN] BehaviorFamily '{fam}' not in episode_family_cap_multipliers — defaulting to 0.2")
                 over_cap_mult = family_cap_mults.get(fam, 0.2)
                 adj = row["ScoreContribution"] * over_cap_mult
             else:
@@ -537,21 +604,26 @@ def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict, 
         # Dominant family = highest adjusted-score contributor (not alphabetically first)
         dominant_family = max(family_scores, key=family_scores.get) if family_scores else "Unknown"
 
+        # ATT&CK transition bonus: multiplicative reward for known kill-chain progressions
         tactics = g["TacticCategory"].unique().tolist()
+        transition_mult, transitions_found = compute_transition_bonus(set(tactics), cfg or {})
+
         records.append({
-            entity_col:          entity,
-            "EpisodeID":         ep_id,
-            "StartTime":         g["Timestamp"].min(),
-            "EndTime":           g["Timestamp"].max(),
-            "DurationHours":     round((g["Timestamp"].max() - g["Timestamp"].min()).total_seconds() / 3600, 2),
-            "SceneCount":        len(g),
-            "TacticCount":       len(tactics),
-            "Tactics":           ", ".join(sorted(tactics)),
-            "BehaviorFamilies":  ", ".join(sorted(unique_fams)),
-            "DominantFamily":    dominant_family,
-            "FamilyCount":       n_fams,
-            "CorroborationMult": round(corr_mult, 3),
-            "EpisodeRiskScore":  round(base_score * corr_mult, 2),
+            entity_col:              entity,
+            "EpisodeID":             ep_id,
+            "StartTime":             g["Timestamp"].min(),
+            "EndTime":               g["Timestamp"].max(),
+            "DurationHours":         round((g["Timestamp"].max() - g["Timestamp"].min()).total_seconds() / 3600, 2),
+            "SceneCount":            len(g),
+            "TacticCount":           len(tactics),
+            "Tactics":               ", ".join(sorted(tactics)),
+            "BehaviorFamilies":      ", ".join(sorted(unique_fams)),
+            "DominantFamily":        dominant_family,
+            "FamilyCount":           n_fams,
+            "CorroborationMult":     round(corr_mult, 3),
+            "TacticTransitionMult":  round(transition_mult, 3),
+            "TacticTransitions":     ", ".join(transitions_found),
+            "EpisodeRiskScore":      round(base_score * corr_mult * transition_mult, 2),
         })
 
     return pd.DataFrame(records).sort_values("EpisodeRiskScore", ascending=False)
@@ -705,7 +777,8 @@ def build_attack_chains(device_seasons: pd.DataFrame, scenes: pd.DataFrame, cfg:
     account_devices = account_devices[account_devices["DeviceName"].apply(len) > 1]
 
     if account_devices.empty:
-        return pd.DataFrame(columns=["ChainID", "Devices", "PivotAccounts", "DeviceCount", "ChainRiskScore"])
+        return pd.DataFrame(columns=["ChainID", "Devices", "PivotAccounts", "DeviceCount",
+                                     "ChainRiskScore", "IsFanOut", "MaxAccountFanOut"])
 
     # Union-Find to merge overlapping device sets
     parent = {}
@@ -741,10 +814,13 @@ def build_attack_chains(device_seasons: pd.DataFrame, scenes: pd.DataFrame, cfg:
     chains = {root: devs for root, devs in chain_map.items() if len(devs) > 1}
 
     if not chains:
-        return pd.DataFrame(columns=["ChainID", "Devices", "PivotAccounts", "DeviceCount", "ChainRiskScore"])
+        return pd.DataFrame(columns=["ChainID", "Devices", "PivotAccounts", "DeviceCount",
+                                     "ChainRiskScore", "IsFanOut", "MaxAccountFanOut"])
 
     # Build chain risk scores using device_seasons
     device_risk = device_seasons.set_index("DeviceName")["TotalRisk"].to_dict()
+
+    fan_out_threshold = cfg.get("attack_chain_hygiene", {}).get("fan_out_threshold", 3)
 
     records = []
     for chain_id, (root, devs) in enumerate(chains.items(), start=1):
@@ -752,12 +828,22 @@ def build_attack_chains(device_seasons: pd.DataFrame, scenes: pd.DataFrame, cfg:
             account_devices["DeviceName"].apply(lambda s: len(s & devs) > 1)
         ]["AccountName"].tolist()
         chain_risk = sum(device_risk.get(d, 0) for d in devs)
+
+        # Fan-out: flag when a pivot account spreads across many devices in this chain
+        chain_acct_rows = account_devices[account_devices["AccountName"].isin(pivot_accounts)]
+        max_fanout = max(
+            (len(row["DeviceName"] & devs) for _, row in chain_acct_rows.iterrows()),
+            default=1,
+        )
+
         records.append({
-            "ChainID": chain_id,
-            "Devices": " | ".join(sorted(devs)),
-            "PivotAccounts": " | ".join(sorted(pivot_accounts)),
-            "DeviceCount": len(devs),
-            "ChainRiskScore": chain_risk,
+            "ChainID":          chain_id,
+            "Devices":          " | ".join(sorted(devs)),
+            "PivotAccounts":    " | ".join(sorted(pivot_accounts)),
+            "DeviceCount":      len(devs),
+            "ChainRiskScore":   chain_risk,
+            "IsFanOut":         max_fanout >= fan_out_threshold,
+            "MaxAccountFanOut": max_fanout,
         })
 
     return pd.DataFrame(records).sort_values("ChainRiskScore", ascending=False).reset_index(drop=True)
@@ -1083,7 +1169,7 @@ def compute_historical_baselines(
             seasons.at[idx, "IsZScoreAnomaly"] = bool(zscore >= zscore_threshold)
             hist_tactics_max = int(ent_hist["UniqueTactics"].max())
             seasons.at[idx, "IsTacticExpansion"] = bool(
-                current_tactics > hist_tactics_max + tactic_exp - 1
+                current_tactics >= hist_tactics_max + tactic_exp
             )
 
         seasons.at[idx, "IsEmergingEntity"] = bool(
@@ -1242,6 +1328,8 @@ def write_excel(
                     EnvDeviceCount=("DeviceName", "nunique"),
                     UniqueAccounts=("AccountName", "nunique"),
                     TotalHits=("DeviceName", "count"),
+                    TopDestinations=("SceneDestination",
+                        lambda x: ", ".join(sorted({v for v in x if v})[:5])),
                 )
                 .reset_index()
                 .rename(columns={"EvidenceNormalized": "Evidence"})

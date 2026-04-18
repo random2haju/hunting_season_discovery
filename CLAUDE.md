@@ -78,6 +78,8 @@ New tactic categories not already in `config.json` will score as 1 and log a war
 | `episode_family_cap` | Max scenes per BehaviorFamily per episode that contribute full score (default 3). Beyond this, `episode_family_cap_multipliers[family]` is applied. |
 | `episode_family_cap_multipliers` | Per-family over-cap multiplier (e.g. `ShellExecution`=0.15). High-value families like CredentialDump default to 1.0 (no reduction). |
 | `corroboration_bonus` | Reward episodes that mix behavior families. `min_families_for_bonus`=2, `bonus_per_additional_family`=1.4 (2 families → 1.4×, 3 → 1.96×), `max_bonus_multiplier`=5.0. |
+| `tactic_transitions` | Reward episodes whose tactic set spans known ATT&CK progressions (e.g. CredentialAccess+LateralMovement). Each matching pair contributes a multiplier; all matching pairs stack multiplicatively, capped at `max_multiplier` (default 2.0). Adds `TacticTransitionMult` and `TacticTransitions` columns to Episodes sheet. |
+| `attack_chain_hygiene.fan_out_threshold` | Accounts appearing on ≥ N devices within a chain are flagged `IsFanOut=True` (default 3). Adds `IsFanOut` and `MaxAccountFanOut` columns to Attack Chains sheet. |
 | `season_diminishing_returns` | Controls the season TotalRisk formula. `diminishing_log_base`=2.0 (rank weight = 1/log2(rank+2)), `same_family_decay_after`=1, `same_family_decay_factor`=0.5 (2nd same-family episode = 0.5×, 3rd = 0.25×). |
 | `history.enabled` | Toggle historical analysis on/off (default true). When false the script behaves exactly as before this feature was added. |
 | `history.store_path` | Path to the SQLite history file relative to the script directory (default `output/hunt_history.db`). |

@@ -54,8 +54,11 @@ let shadow_ai_binaries = dynamic([
 let process_hits = materialize(
     DeviceProcessEvents
     | where Timestamp > ago(baseline_window)
+    // Primary: binary name match (precise)
+    // Fallback: Python interpreter running a known AI script by name
     | where FileName in~ (shadow_ai_binaries)
-        or ProcessCommandLine has_any (shadow_ai_binaries)
+        or (FileName in~ ("python.exe", "python3.exe", "python")
+            and ProcessCommandLine has_any ("text-generation-webui", "koboldcpp", "localai"))
     | extend AccountName = InitiatingProcessAccountName
     | extend Evidence = strcat(
         "Process: ",   FileName,

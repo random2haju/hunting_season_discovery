@@ -15,6 +15,9 @@
 let hunt_window          = 1d;
 let baseline_window      = 3d;
 let prevalence_threshold = 5;
+// IDE / dev-tool parent processes — shell binaries spawned by these are normal
+// developer workflows and should not fire as LOLBins.
+let ide_parents = dynamic(["Code.exe", "Cursor.exe", "WindowsTerminal.exe", "node.exe", "wt.exe", "claude.exe"]);
 
 // All suspicious LOLBin activity across the full window
 let all_suspicious = materialize(
@@ -81,9 +84,19 @@ let all_suspicious = materialize(
         or (FileName =~ "bash.exe" and ProcessCommandLine has_any (
             "-c ", "curl", "wget", "nc ", "python", "perl", "ruby",
             "/dev/tcp", "chmod +x", "base64"
-        ) and InitiatingProcessFileName !in~ (
-            "Code.exe", "Cursor.exe", "WindowsTerminal.exe", "node.exe", "wt.exe"
-        ))
+        ) and InitiatingProcessFileName !in~ (ide_parents))
+        or (FileName =~ "cmd.exe" and ProcessCommandLine has_any (
+            "powershell -e", "powershell -enc", "powershell -w hidden",
+            "certutil", "bitsadmin", "regsvr32",
+            "\\\\", "http://", "https://"
+        ) and InitiatingProcessFileName !in~ (ide_parents))
+        or (FileName =~ "powershell.exe" and ProcessCommandLine has_any (
+            "-EncodedCommand", "-enc ", "-e ",
+            "IEX", "Invoke-Expression",
+            "DownloadString", "DownloadFile", "WebClient",
+            "-exec bypass", "-ExecutionPolicy bypass",
+            "FromBase64String"
+        ) and InitiatingProcessFileName !in~ (ide_parents))
         or (FileName =~ "msdt.exe" and ProcessCommandLine has_any (
             "ms-msdt:", "PCWDiagnostic", "IT_BrowseForFile", "IT_LaunchMethod"
         ))

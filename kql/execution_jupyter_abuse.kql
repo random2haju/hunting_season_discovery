@@ -62,11 +62,8 @@ let all_suspicious = materialize(
     | where Timestamp > ago(baseline_window)
     // Child is a suspicious shell or network process
     | where FileName in~ (suspicious_children)
-    // Parent is a Jupyter process (by name or command line — covers WSL/Linux paths)
+    // Parent is a Jupyter process — match by process name only (precise, no substring risk)
     | where InitiatingProcessFileName in~ (jupyter_parents)
-        or InitiatingProcessCommandLine has "ipykernel_launcher"
-        or InitiatingProcessCommandLine has "jupyter-notebook"
-        or InitiatingProcessCommandLine has "jupyter lab"
     // Optional: tighten python.exe child detection to only flag when cmdline
     // contains network or encoding indicators (uncomment to reduce !pip noise):
     // | where not (
