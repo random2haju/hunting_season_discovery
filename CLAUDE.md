@@ -79,6 +79,8 @@ New tactic categories not already in `config.json` will score as 1 and log a war
 | `episode_family_cap_multipliers` | Per-family over-cap multiplier (e.g. `ShellExecution`=0.15). High-value families like CredentialDump default to 1.0 (no reduction). |
 | `corroboration_bonus` | Reward episodes that mix behavior families. `min_families_for_bonus`=2, `bonus_per_additional_family`=1.4 (2 families → 1.4×, 3 → 1.96×), `max_bonus_multiplier`=5.0. |
 | `tactic_transitions` | Reward episodes whose tactic set spans known ATT&CK progressions (e.g. CredentialAccess+LateralMovement). Each matching pair contributes a multiplier; all matching pairs stack multiplicatively, capped at `max_multiplier` (default 2.0). Adds `TacticTransitionMult` and `TacticTransitions` columns to Episodes sheet. |
+| `adaptive_behavior.variation_cluster_min_size` | Minimum number of distinct Evidence strings within one (device, DetectionType) group in a single episode to declare a variation cluster (default 3). A cluster indicates automated try-and-adjust behavior — the same tool used against many distinct targets in rapid succession. |
+| `adaptive_behavior.variation_score_bonus` | Multiplicative bonus applied to `EpisodeRiskScore` when at least one variation cluster is detected (default 1.15 = +15%). Intentionally small to surface adaptive episodes slightly higher without overriding tactic weight or prevalence. Raise to 1.3–1.5 in high-confidence environments. |
 | `attack_chain_hygiene.fan_out_threshold` | Accounts appearing on ≥ N devices within a chain are flagged `IsFanOut=True` (default 3). Adds `IsFanOut` and `MaxAccountFanOut` columns to Attack Chains sheet. |
 | `season_diminishing_returns` | Controls the season TotalRisk formula. `diminishing_log_base`=2.0 (rank weight = 1/log2(rank+2)), `same_family_decay_after`=1, `same_family_decay_factor`=0.5 (2nd same-family episode = 0.5×, 3rd = 0.25×). |
 | `history.enabled` | Toggle historical analysis on/off (default true). When false the script behaves exactly as before this feature was added. |
@@ -96,9 +98,15 @@ New tactic categories not already in `config.json` will score as 1 and log a war
 
 After each run the script appends one record per device and user to `output/hunt_history.db` (SQLite). On the next run this baseline is loaded, and Device Seasons / User Seasons gain extra columns:
 
-`PreviousScore`, `BaselineMean`, `BaselineMedian`, `BaselineStdDev`, `HistoricalMax`, `RunCount`, `ScoreDelta`, `ScoreDeltaPct`, `ZScore`, `IsNewHigh`, `IsScoreSpike`, `IsEmergingEntity`, `IsTacticExpansion`
+`PreviousScore`, `BaselineMean`, `BaselineMedian`, `BaselineStdDev`, `HistoricalMax`, `RunCount`, `ScoreDelta`, `ScoreDeltaPct`, `ZScore`, `IsNewHigh`, `IsScoreSpike`, `IsEmergingEntity`, `IsTacticExpansion`, `IsAdaptingTactics`, `NewTactics`
 
-A **Historical Anomalies** sheet (3rd in the workbook, before Attack Chains) surfaces entities where any flag is True, sorted by `HistoricalPriority` — a formula that rewards relative change weighted by absolute score magnitude.
+Episodes sheet also gains: `VariationClusterCount`, `LargestVariationCluster`, `AdaptiveBehaviorFlag`, `AdaptiveBehaviorReason`.
+
+Device/User Seasons sheets also gain: `TacticSet`, `MaxEpisodeVariationCluster`, `AdaptiveEpisodeCount`.
+
+**`IsAdaptingTactics`**: fires when the current run's tactic set contains a tactic never seen in any prior run for that entity. This is the canonical low-and-slow AI-agent signal — unlike `IsTacticExpansion` (which only catches count growth), `IsAdaptingTactics` also catches tactic *substitution*. `NewTactics` lists the specific new tactics as a comma-joined string. Protected by `minimum_runs_for_baseline`.
+
+A **Historical Anomalies** sheet (3rd in the workbook, before Attack Chains) surfaces entities where any flag is True, sorted by `HistoricalPriority` — a formula that rewards relative change weighted by absolute score magnitude. `IsAdaptingTactics` carries the same +2.5 priority bonus as `IsTacticExpansion` so that quietly-adapting entities surface even when their ZScore is low.
 
 **First run**: no history exists, DB is created automatically, all flags are False (except `IsEmergingEntity` for entities above the score threshold).
 

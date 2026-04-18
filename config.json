@@ -158,6 +158,11 @@
     "fan_out_threshold": 3
   },
 
+  "adaptive_behavior": {
+    "variation_cluster_min_size": 3,
+    "variation_score_bonus":      1.15
+  },
+
   "history": {
     "enabled":                        true,
     "store_path":                     "output/hunt_history.db",

@@ -519,6 +519,51 @@ def assign_episodes(scenes: pd.DataFrame, window_hours: float, entity_col: str) 
     return df
 
 
+def build_variation_clusters(g: "pd.DataFrame", cfg: dict) -> "tuple[int, int, bool, str]":
+    """
+    Detect automated / adaptive behavior within a single episode group.
+
+    An attacker (or AI agent) operating in try-and-adjust mode will reuse the
+    same tool class (DetectionType) against many distinct targets or with many
+    distinct argument sets in rapid succession.  A human operator rarely does this
+    within a single 4-hour window.
+
+    Logic:
+      - Use EvidenceNormalized if present, else Evidence.
+      - Group the episode by (DeviceName, DetectionType).
+      - Count n_variants = number of unique evidence strings per group.
+      - If any group has n_variants >= variation_cluster_min_size, the episode
+        is flagged as exhibiting adaptive behavior.
+
+    Returns:
+      cluster_count    — how many (device, detection_type) groups are variation clusters
+      largest_cluster  — max n_variants seen across all groups
+      flag             — True if at least one cluster meets the threshold
+      reason_str       — human-readable description for the Evidence column
+    """
+    ab_cfg    = cfg.get("adaptive_behavior", {})
+    min_size  = int(ab_cfg.get("variation_cluster_min_size", 3))
+    ev_col    = "EvidenceNormalized" if "EvidenceNormalized" in g.columns else "Evidence"
+
+    cluster_count   = 0
+    largest_cluster = 0
+    reasons: list   = []
+
+    for (device, det_type), sub in g.groupby(["DeviceName", "DetectionType"]):
+        n_variants = len(sub[ev_col].unique())
+        if n_variants > largest_cluster:
+            largest_cluster = n_variants
+        if n_variants >= min_size:
+            cluster_count += 1
+            reasons.append(
+                f"{n_variants} variants of {det_type} on {device}"
+            )
+
+    flag       = cluster_count > 0
+    reason_str = "; ".join(reasons) if reasons else ""
+    return cluster_count, largest_cluster, flag, reason_str
+
+
 def compute_transition_bonus(tactic_set: set, cfg: dict) -> "tuple[float, list[str]]":
     """
     Compute a multiplicative bonus for episodes whose tactic set spans one or more
@@ -608,22 +653,35 @@ def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict, 
         tactics = g["TacticCategory"].unique().tolist()
         transition_mult, transitions_found = compute_transition_bonus(set(tactics), cfg or {})
 
+        # Variation clustering: detect try-and-adjust / AI-agent automated behavior
+        var_clusters, largest_cluster, adaptive_flag, adaptive_reason = \
+            build_variation_clusters(g, cfg or {})
+        ab_cfg = (cfg or {}).get("adaptive_behavior", {})
+        variation_mult = (
+            float(ab_cfg.get("variation_score_bonus", 1.15))
+            if adaptive_flag else 1.0
+        )
+
         records.append({
-            entity_col:              entity,
-            "EpisodeID":             ep_id,
-            "StartTime":             g["Timestamp"].min(),
-            "EndTime":               g["Timestamp"].max(),
-            "DurationHours":         round((g["Timestamp"].max() - g["Timestamp"].min()).total_seconds() / 3600, 2),
-            "SceneCount":            len(g),
-            "TacticCount":           len(tactics),
-            "Tactics":               ", ".join(sorted(tactics)),
-            "BehaviorFamilies":      ", ".join(sorted(unique_fams)),
-            "DominantFamily":        dominant_family,
-            "FamilyCount":           n_fams,
-            "CorroborationMult":     round(corr_mult, 3),
-            "TacticTransitionMult":  round(transition_mult, 3),
-            "TacticTransitions":     ", ".join(transitions_found),
-            "EpisodeRiskScore":      round(base_score * corr_mult * transition_mult, 2),
+            entity_col:               entity,
+            "EpisodeID":              ep_id,
+            "StartTime":              g["Timestamp"].min(),
+            "EndTime":                g["Timestamp"].max(),
+            "DurationHours":          round((g["Timestamp"].max() - g["Timestamp"].min()).total_seconds() / 3600, 2),
+            "SceneCount":             len(g),
+            "TacticCount":            len(tactics),
+            "Tactics":                ", ".join(sorted(tactics)),
+            "BehaviorFamilies":       ", ".join(sorted(unique_fams)),
+            "DominantFamily":         dominant_family,
+            "FamilyCount":            n_fams,
+            "CorroborationMult":      round(corr_mult, 3),
+            "TacticTransitionMult":   round(transition_mult, 3),
+            "TacticTransitions":      ", ".join(transitions_found),
+            "VariationClusterCount":  var_clusters,
+            "LargestVariationCluster": largest_cluster,
+            "AdaptiveBehaviorFlag":   adaptive_flag,
+            "AdaptiveBehaviorReason": adaptive_reason,
+            "EpisodeRiskScore":       round(base_score * corr_mult * transition_mult * variation_mult, 2),
         })
 
     return pd.DataFrame(records).sort_values("EpisodeRiskScore", ascending=False)
@@ -667,6 +725,13 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
     # not the max TacticCount from a single episode (which under-counts multi-episode seasons).
     entity_tactic_counts = scenes.groupby(entity_col)["TacticCategory"].nunique()
 
+    # TacticSet: sorted comma-joined string of unique tactics — used for cross-run tactic
+    # adaptation detection (IsAdaptingTactics) and analyst readability.
+    entity_tactic_sets = (
+        scenes.groupby(entity_col)["TacticCategory"]
+        .apply(lambda x: ", ".join(sorted(x.dropna().unique())))
+    )
+
     season_records = []
     for entity, ep_group in episodes.groupby(entity_col):
         ep_group = ep_group.sort_values("EpisodeRiskScore", ascending=False)
@@ -697,6 +762,17 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
             "LastSeen":       ep_group["EndTime"].max(),
             # Union of all tactics across all episodes — correct cross-episode count
             "UniqueTactics":  int(entity_tactic_counts.get(entity, 0)),
+            # Sorted comma-joined tactic names — used for cross-run tactic adaptation detection
+            "TacticSet":      entity_tactic_sets.get(entity, ""),
+            # Variation cluster rollup: max cluster size and count of adaptive episodes
+            "MaxEpisodeVariationCluster": int(
+                ep_group["LargestVariationCluster"].max()
+                if "LargestVariationCluster" in ep_group.columns else 0
+            ),
+            "AdaptiveEpisodeCount": int(
+                ep_group["AdaptiveBehaviorFlag"].sum()
+                if "AdaptiveBehaviorFlag" in ep_group.columns else 0
+            ),
         })
 
     ep_summary = pd.DataFrame(season_records).set_index(entity_col)
@@ -858,6 +934,7 @@ _HISTORY_COLS = [
     "EntityType", "EntityName", "SeasonScore", "EpisodeCount",
     "SceneCount", "UniqueTactics", "BehaviorFamilyCount", "TopBehaviorFamily",
     "HasMDEAlert", "CrossDeviceLink", "TopEpisodeScore", "TopTactic",
+    "TacticSet",
 ]
 
 
@@ -993,6 +1070,7 @@ def _build_history_row(
         "CrossDeviceLink":     cross_device_link,
         "TopEpisodeScore":     float(row["MaxEpisodeRisk"]),
         "TopTactic":           top_tactic,
+        "TacticSet":           str(row.get("TacticSet", "")),
     }
 
 
@@ -1052,7 +1130,8 @@ def append_to_history(
                 HasMDEAlert         INTEGER NOT NULL DEFAULT 0,
                 CrossDeviceLink     INTEGER NOT NULL DEFAULT 0,
                 TopEpisodeScore     REAL    NOT NULL,
-                TopTactic           TEXT    NOT NULL DEFAULT ''
+                TopTactic           TEXT    NOT NULL DEFAULT '',
+                TacticSet           TEXT    NOT NULL DEFAULT ''
             )
         """)
         con.execute("""
@@ -1100,8 +1179,10 @@ def compute_historical_baselines(
     for col in ["PreviousScore", "BaselineMean", "BaselineMedian", "BaselineStdDev",
                 "HistoricalMax", "RunCount", "ScoreDelta", "ScoreDeltaPct", "ZScore"]:
         seasons[col] = float("nan")
-    for col in ["IsNewHigh", "IsScoreSpike", "IsZScoreAnomaly", "IsEmergingEntity", "IsTacticExpansion"]:
+    for col in ["IsNewHigh", "IsScoreSpike", "IsZScoreAnomaly", "IsEmergingEntity",
+                "IsTacticExpansion", "IsAdaptingTactics"]:
         seasons[col] = False
+    seasons["NewTactics"] = ""
 
     if history.empty:
         emerg_mask = seasons["TotalRisk"] >= emerg_thresh
@@ -1172,6 +1253,26 @@ def compute_historical_baselines(
                 current_tactics >= hist_tactics_max + tactic_exp
             )
 
+            # IsAdaptingTactics: fires when any tactic in the current run was NEVER seen
+            # in any prior run.  Complements IsTacticExpansion (which only catches count
+            # growth) by also catching tactic *substitution* — e.g. swapping Discovery for
+            # CredentialAccess at the same breadth, which is invisible to IsTacticExpansion.
+            if "TacticSet" in ent_hist.columns:
+                current_ts = {
+                    t.strip()
+                    for t in str(row.get("TacticSet", "")).split(",")
+                    if t.strip()
+                }
+                hist_ts_union: set = set()
+                for ts_str in ent_hist["TacticSet"].dropna():
+                    hist_ts_union.update(
+                        t.strip() for t in str(ts_str).split(",") if t.strip()
+                    )
+                new_tactics = current_ts - hist_ts_union
+                if new_tactics:
+                    seasons.at[idx, "IsAdaptingTactics"] = True
+                    seasons.at[idx, "NewTactics"] = ", ".join(sorted(new_tactics))
+
         seasons.at[idx, "IsEmergingEntity"] = bool(
             run_count <= emerg_max_runs and current_score >= emerg_thresh
         )
@@ -1192,6 +1293,7 @@ def _compute_priority(row: "pd.Series") -> float:
         (3.0 if row.get("IsScoreSpike") else 0.0) +
         (2.0 if row.get("IsNewHigh") else 0.0) +
         (2.5 if row.get("IsTacticExpansion") else 0.0) +
+        (2.5 if row.get("IsAdaptingTactics") else 0.0) +
         (1.5 if row.get("IsEmergingEntity") else 0.0) +
         (1.0 if row.get("IsZScoreAnomaly") else 0.0)   # additive: Z already in base, this rewards it
     )
@@ -1208,12 +1310,14 @@ def generate_historical_anomalies(
     Collect all entities where any anomaly flag is True, compute HistoricalPriority,
     and return sorted by priority descending.
     """
-    flag_cols = ["IsNewHigh", "IsScoreSpike", "IsZScoreAnomaly", "IsEmergingEntity", "IsTacticExpansion"]
+    flag_cols = ["IsNewHigh", "IsScoreSpike", "IsZScoreAnomaly", "IsEmergingEntity",
+                 "IsTacticExpansion", "IsAdaptingTactics"]
     output_cols = [
         "EntityType", "EntityName", "TotalRisk", "HistoricalPriority",
         "PreviousScore", "ScoreDelta", "ScoreDeltaPct", "ZScore",
         "BaselineMean", "BaselineStdDev", "HistoricalMax", "RunCount",
-        "IsNewHigh", "IsScoreSpike", "IsZScoreAnomaly", "IsEmergingEntity", "IsTacticExpansion",
+        "IsNewHigh", "IsScoreSpike", "IsZScoreAnomaly", "IsEmergingEntity",
+        "IsTacticExpansion", "IsAdaptingTactics", "NewTactics",
     ]
 
     def _prep(df, entity_type, entity_col):
