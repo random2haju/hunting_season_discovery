@@ -68,14 +68,6 @@
   "prevalence_boost_threshold": 3,
   "prevalence_suppression_multiplier": 0.2,
   "prevalence_boost_multiplier": 1.5,
-  "alert_severity_weights": {
-    "High": 10,
-    "Medium": 6,
-    "Low": 3,
-    "Informational": 1
-  },
-  "mde_alert_frequency_boost_threshold": 2,
-  "mde_alert_frequency_boost_multiplier": 1.5,
   "max_scenes_per_pattern_per_device": 3,
   "use_evidence_clustering": false,
   "evidence_clustering_sim_threshold": 0.5,
@@ -86,12 +78,12 @@
     {"pattern": "(?i)(sk-(?:proj-|ant-|or-v1-)?)[A-Za-z0-9_\\-]{10,}", "replacement": "\\1<redacted>"}
   ],
 
-  "lolbin_trust_tiers": {
+  "execution_trust_tiers": {
     "baseline_common": ["bash.exe", "python.exe", "python3.exe", "node.exe", "perl.exe", "ruby.exe", "sh.exe", "wsl.exe"],
     "contextual":      ["wscript.exe", "cscript.exe", "rundll32.exe", "regsvr32.exe", "msiexec.exe", "msbuild.exe", "csc.exe", "installutil.exe"],
     "high_signal":     ["certutil.exe", "mshta.exe", "msdt.exe", "cmstp.exe", "odbcconf.exe", "forfiles.exe", "pcalua.exe", "presentationhost.exe"]
   },
-  "lolbin_tier_base_multipliers": {
+  "execution_tier_multipliers": {
     "baseline_common": 0.3,
     "contextual":      1.0,
     "high_signal":     1.8,

@@ -36,9 +36,9 @@ HISTORY_OUTPUT_VERSION = 1
 # ---------------------------------------------------------------------------
 
 def _build_tier_lookup(cfg: dict) -> dict:
-    """Build O(1) process-name → tier-name dict from lolbin_trust_tiers config."""
+    """Build O(1) process-name → tier-name dict from execution_trust_tiers config."""
     lookup = {}
-    for tier, procs in cfg.get("lolbin_trust_tiers", {}).items():
+    for tier, procs in cfg.get("execution_trust_tiers", {}).items():
         for p in procs:
             lookup[p.lower()] = tier
     return lookup
@@ -92,14 +92,14 @@ def _extract_destination(pe: dict) -> str:
     return pe.get("destination", "")
 
 
-def classify_lolbin_tier(detection_type: str, parsed_ev: dict, tier_lookup: dict) -> str:
+def classify_execution_tier(detection_type: str, parsed_ev: dict, tier_lookup: dict) -> str:
     """
-    Return the LOLBin trust tier for a scene.
-    Only classifies shell/execution detection types; all others return 'not_lolbin'.
+    Return the execution trust tier for a scene.
+    Only classifies shell/execution detection types; all others return 'not_classified'.
     """
-    lolbin_types = {"LOLBin Execution", "Jupyter Shell Execution", "Shadow AI Tooling"}
-    if detection_type not in lolbin_types:
-        return "not_lolbin"
+    execution_types = {"Jupyter Shell Execution", "Shadow AI Tooling"}
+    if detection_type not in execution_types:
+        return "not_classified"
     process = parsed_ev.get("process", "").lower()
     return tier_lookup.get(process, "unknown")
 
@@ -143,19 +143,19 @@ def score_commandline_shape(parsed_ev: dict, cfg: dict) -> float:
 
 def compute_context_multiplier(tier: str, context: str, cmdline_score: float, cfg: dict) -> float:
     """
-    Combine LOLBin tier multiplier × developer-context discount × command-line shape score.
+    Combine execution tier multiplier × developer-context discount × command-line shape score.
     Floor at 0.05 so every scene stays visible to analysts.
     """
-    tier_mults = cfg.get("lolbin_tier_base_multipliers", {})
-    # Non-LOLBin scenes are not adjusted by tier
-    tier_mult = 1.0 if tier == "not_lolbin" else tier_mults.get(tier, 1.0)
+    tier_mults = cfg.get("execution_tier_multipliers", {})
+    # Unclassified scenes are not adjusted by tier
+    tier_mult = 1.0 if tier == "not_classified" else tier_mults.get(tier, 1.0)
     dev_discount = 1.0
     # Dev discount only applies to baseline-common tier — contextual/high-signal are suspicious regardless of parent
     if context == "DeveloperTooling" and tier == "baseline_common":
         dev_discount = cfg.get("dev_context_discount", 0.25)
     # Suspicious parent escalates contextual tier to high-signal scoring
     if context == "SuspiciousShape" and tier == "contextual":
-        tier_mult = tier_mults.get("high_signal", 1.8)
+        tier_mult = tier_mults.get("high_signal", 1.8)  # noqa: no config key change needed — tier names unchanged
     return max(round(tier_mult * dev_discount * cmdline_score, 3), 0.05)
 
 
@@ -285,14 +285,6 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
         print(f"  [WARN] Dropped {dropped} row(s) with unparseable timestamps")
     scenes["ScoreContribution"] = scenes["TacticCategory"].map(tactic_weights).fillna(1).astype(int)
 
-    # For rows that carry a Severity column (MDE alerts), override ScoreContribution
-    if "Severity" in scenes.columns:
-        sev_map = cfg.get("alert_severity_weights", {})
-        mask = scenes["Severity"].notna() & scenes["Severity"].ne("")
-        scenes.loc[mask, "ScoreContribution"] = (
-            scenes.loc[mask, "Severity"].map(sev_map).fillna(1).astype(int)
-        )
-
     # Optional per-DetectionType multipliers — fine-grained tuning on top of tactic weights
     dt_mult = cfg.get("detection_type_multipliers", {})
     if dt_mult:
@@ -310,8 +302,8 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
 
     parsed_evs = scenes["Evidence"].apply(parse_evidence_fields)
 
-    scenes["LolbinTrustTier"] = [
-        classify_lolbin_tier(dt, pe, tier_lookup)
+    scenes["ExecutionTier"] = [
+        classify_execution_tier(dt, pe, tier_lookup)
         for dt, pe in zip(scenes["DetectionType"], parsed_evs)
     ]
     scenes["ExecutionContext"] = [
@@ -323,7 +315,7 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
     scenes["ContextMultiplier"] = [
         compute_context_multiplier(tier, ctx, clrs, cfg)
         for tier, ctx, clrs in zip(
-            scenes["LolbinTrustTier"], scenes["ExecutionContext"], scenes["CommandLineRiskScore"]
+            scenes["ExecutionTier"], scenes["ExecutionContext"], scenes["CommandLineRiskScore"]
         )
     ]
     scenes["ScoreContribution"] = (
@@ -331,7 +323,7 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
     ).round(2)
     scenes["BehaviorFamily"] = scenes["DetectionType"].map(behavior_families_map).fillna("Unknown")
     scenes["TrustContext"] = np.where(
-        (scenes["ExecutionContext"] == "DeveloperTooling") & (scenes["LolbinTrustTier"] == "baseline_common"),
+        (scenes["ExecutionContext"] == "DeveloperTooling") & (scenes["ExecutionTier"] == "baseline_common"),
         "DevContext",
         np.where(
             (scenes["ExecutionContext"] == "SuspiciousShape") | (scenes["CommandLineRiskScore"] >= 1.3),
@@ -369,19 +361,13 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
 
 def apply_prevalence_scoring(scenes: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     """
-    Adjust ScoreContribution based on prevalence — but with two distinct models:
+    Adjust ScoreContribution based on environment-wide prevalence.
 
-    Behavioral detections (no Severity column):
-        Environment-wide device count per EvidenceNormalized pattern.
+    Environment-wide device count per EvidenceNormalized pattern:
         Rare patterns (few devices) get a boost; widespread patterns get suppressed
-        — widespread = likely IT tooling or benign software.
+        — widespread = likely sanctioned tooling, not a novel threat.
 
-    MDE native alerts (non-empty Severity column):
-        Never suppressed — AV/EDR detections are curated threat intel, not noise.
-        Instead, boosted when the same alert fires multiple times on the same device
-        (per-device frequency >= mde_alert_frequency_boost_threshold).
-
-    Evidence normalization (applied to both paths before grouping):
+    Evidence normalization:
         evidence_normalizations in config.json is a list of {pattern, replacement}
         regex pairs applied in sequence to create EvidenceNormalized. This collapses
         user-specific path segments (e.g. C:\\Users\\alice\\ → C:\\Users\\<user>\\)
@@ -392,10 +378,8 @@ def apply_prevalence_scoring(scenes: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     boost_threshold = cfg.get("prevalence_boost_threshold", 3)
     supp_mult  = cfg.get("prevalence_suppression_multiplier", 0.2)
     boost_mult = cfg.get("prevalence_boost_multiplier", 1.5)
-    mde_freq_threshold = cfg.get("mde_alert_frequency_boost_threshold", 2)
-    mde_freq_boost = cfg.get("mde_alert_frequency_boost_multiplier", 1.5)
 
-    # --- Evidence normalization (applies to all rows) ---
+    # --- Evidence normalization ---
     normalizations = cfg.get("evidence_normalizations", [])
     scenes["EvidenceNormalized"] = scenes["Evidence"].astype(str)
     for norm in normalizations:
@@ -407,72 +391,34 @@ def apply_prevalence_scoring(scenes: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     if cfg.get("use_evidence_clustering", False):
         scenes["EvidenceNormalized"] = cluster_evidence(scenes, cfg)
 
-    # --- Split into behavioral and MDE alert rows ---
-    if "Severity" in scenes.columns:
-        is_mde = scenes["Severity"].notna() & scenes["Severity"].ne("")
-    else:
-        is_mde = pd.Series(False, index=scenes.index)
+    # --- Env-wide suppression/boost ---
+    env_counts = (
+        scenes.groupby("EvidenceNormalized")["DeviceName"]
+        .nunique()
+        .rename("EnvDeviceCount")
+        .reset_index()
+    )
+    scenes = scenes.merge(env_counts, on="EvidenceNormalized", how="left")
 
-    behavioral = scenes[~is_mde].copy()
-    mde = scenes[is_mde].copy()
+    def _multiplier(count):
+        if count > supp_threshold:
+            return supp_mult
+        if count <= boost_threshold:
+            return boost_mult
+        return 1.0
 
-    # --- Behavioral path: env-wide suppression/boost ---
-    if not behavioral.empty:
-        env_counts = (
-            behavioral.groupby("EvidenceNormalized")["DeviceName"]
-            .nunique()
-            .rename("EnvDeviceCount")
-            .reset_index()
-        )
-        behavioral = behavioral.merge(env_counts, on="EvidenceNormalized", how="left")
+    scenes["PrevalenceMultiplier"] = scenes["EnvDeviceCount"].apply(_multiplier)
+    scenes["ScoreContribution"] = (
+        scenes["ScoreContribution"] * scenes["PrevalenceMultiplier"]
+    ).round(1)
 
-        def _multiplier(count):
-            if count > supp_threshold:
-                return supp_mult
-            if count <= boost_threshold:
-                return boost_mult
-            return 1.0
+    suppressed = env_counts[env_counts["EnvDeviceCount"] > supp_threshold]
+    for _, row in suppressed.iterrows():
+        preview = str(row["EvidenceNormalized"])[:80]
+        print(f"  [PREVALENCE] Pattern seen on {row['EnvDeviceCount']} devices "
+              f"— score multiplier {supp_mult}x: {preview}...")
 
-        behavioral["PrevalenceMultiplier"] = behavioral["EnvDeviceCount"].apply(_multiplier)
-        behavioral["ScoreContribution"] = (
-            behavioral["ScoreContribution"] * behavioral["PrevalenceMultiplier"]
-        ).round(1)
-        behavioral["DeviceAlertCount"] = float("nan")
-
-        suppressed = env_counts[env_counts["EnvDeviceCount"] > supp_threshold]
-        for _, row in suppressed.iterrows():
-            preview = str(row["EvidenceNormalized"])[:80]
-            print(f"  [PREVALENCE] Pattern seen on {row['EnvDeviceCount']} devices "
-                  f"— score multiplier {supp_mult}x: {preview}...")
-
-    # --- MDE alert path: per-device frequency boost, no suppression ---
-    if not mde.empty:
-        # EnvDeviceCount for analyst visibility only — never drives suppression
-        env_counts_mde = (
-            mde.groupby("EvidenceNormalized")["DeviceName"]
-            .nunique()
-            .rename("EnvDeviceCount")
-            .reset_index()
-        )
-        mde = mde.merge(env_counts_mde, on="EvidenceNormalized", how="left")
-
-        # Per-device frequency: how many times did this alert fire on this device?
-        device_counts = (
-            mde.groupby(["DeviceName", "EvidenceNormalized"])
-            .size()
-            .rename("DeviceAlertCount")
-            .reset_index()
-        )
-        mde = mde.merge(device_counts, on=["DeviceName", "EvidenceNormalized"], how="left")
-
-        mde["PrevalenceMultiplier"] = mde["DeviceAlertCount"].apply(
-            lambda c: mde_freq_boost if c >= mde_freq_threshold else 1.0
-        )
-        mde["ScoreContribution"] = (
-            mde["ScoreContribution"] * mde["PrevalenceMultiplier"]
-        ).round(1)
-
-    return pd.concat([behavioral, mde], ignore_index=True)
+    return scenes
 
 
 # ---------------------------------------------------------------------------
@@ -1201,14 +1147,8 @@ def _build_history_row(
     behavior_family_count = len(family_counts)
     top_behavior_family = family_counts.most_common(1)[0][0] if family_counts else ""
 
-    # HasMDEAlert — entity has at least one scene with a non-empty Severity
     ent_scenes = scenes[scenes[entity_col] == entity_name]
-    if "Severity" in scenes.columns:
-        has_mde_alert = int(
-            (ent_scenes["Severity"].notna() & ent_scenes["Severity"].ne("")).any()
-        )
-    else:
-        has_mde_alert = 0
+    has_mde_alert = 0
 
     # CrossDeviceLink
     cross_device_link = 0
@@ -1686,7 +1626,7 @@ def write_excel(
             tactic_scenes = tactic_scenes.sort_values("Timestamp", ascending=False)
             export_cols = ["Timestamp", "DeviceName", "AccountName", "DetectionType",
                            "TacticCategory", "Family", "BehaviorFamily", "WorkflowClass",
-                           "TrustContext", "LolbinTrustTier", "ExecutionContext",
+                           "TrustContext", "ExecutionTier", "ExecutionContext",
                            "CommandLineRiskScore", "ContextMultiplier", "Evidence",
                            "EnvDeviceCount", "PrevalenceMultiplier", "SourceFile"]
             tactic_scenes = tactic_scenes[[c for c in export_cols if c in tactic_scenes.columns]]
@@ -1697,7 +1637,7 @@ def write_excel(
         export_cols = ["Timestamp", "DeviceName", "AccountName", "DetectionType",
                        "TacticCategory", "Family", "BehaviorFamily",
                        "WorkflowClass", "WorkflowReasons",
-                       "TrustContext", "LolbinTrustTier", "ExecutionContext",
+                       "TrustContext", "ExecutionTier", "ExecutionContext",
                        "CommandLineRiskScore", "ContextMultiplier", "Evidence",
                        "EnvDeviceCount", "PrevalenceMultiplier", "SourceFile"]
         all_scenes = all_scenes[[c for c in export_cols if c in all_scenes.columns]]
