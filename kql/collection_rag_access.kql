@@ -1,0 +1,140 @@
+// ============================================================
+// RAG / Vector Database Unusual Access
+// TacticCategory: Collection
+// Source: DeviceNetworkEvents
+//
+// Retrieval-Augmented Generation (RAG) pipelines store sensitive
+// documents as vector embeddings in local vector databases.
+// These databases often contain the most sensitive data in an
+// AI deployment — internal knowledge bases, customer records,
+// proprietary research — queryable by anyone who can reach the
+// local API port.
+//
+// This query detects unusual access to local vector database ports:
+//   - ChromaDB:   :8000
+//   - Qdrant:     :6333 (HTTP), :6334 (gRPC)
+//   - Weaviate:   :8080
+//   - Milvus:     :19530
+//   - Pinecone local: :5080
+//   - LanceDB:    :8181
+//   - Marqo:      :8882
+//
+// Two suspicious patterns:
+//   1. Non-AI processes connecting to these ports — indicates
+//      lateral access by scripts, shells, or tools that should
+//      not be querying the vector DB
+//   2. High connection volume to a single local vector DB port —
+//      bulk embedding queries indicate automated data harvesting
+//
+// FP Reduction:
+//   - Known AI application processes excluded
+//   - Python/node under legitimate AI parents excluded
+//   - System and security processes excluded
+//   - Prevalence threshold suppresses shared infrastructure
+//
+// Tuning:
+//   hunt_window          — how recent the reported events must be
+//   baseline_window      — total lookback including baseline period
+//   prevalence_threshold — suppress patterns seen on > N devices
+//   bulk_query_threshold — min connections to flag as bulk access
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+let bulk_query_threshold = 20;
+
+// Local vector DB ports
+let vector_db_ports = dynamic([
+    8000,   // ChromaDB
+    6333,   // Qdrant HTTP
+    6334,   // Qdrant gRPC
+    8080,   // Weaviate
+    19530,  // Milvus
+    5080,   // Pinecone local
+    8181,   // LanceDB
+    8882    // Marqo
+]);
+
+// AI/ML frameworks and tools legitimately querying vector DBs
+let known_ai_clients = dynamic([
+    "python.exe",   // LangChain, LlamaIndex, CrewAI
+    "node.exe",     // JS AI frameworks
+    "Claude.exe", "Cursor.exe", "windsurf.exe", "code.exe",
+    "ollama.exe"
+]);
+
+// Parents that make python.exe / node.exe access legitimate
+let trusted_parents = dynamic([
+    "Code.exe", "Cursor.exe", "windsurf.exe", "Claude.exe",
+    "WindowsTerminal.exe", "wt.exe", "python.exe", "node.exe"
+]);
+
+// --- Signal 1: Non-AI processes connecting to vector DB ports ---
+let unexpected_access = materialize(
+    DeviceNetworkEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType == "ConnectionSuccess"
+    | where RemoteIP in ("127.0.0.1", "::1") or RemoteUrl startswith "localhost"
+    | where RemotePort in (vector_db_ports)
+    | where InitiatingProcessFileName !in~ (known_ai_clients)
+    | where InitiatingProcessFileName !in~ (
+        "svchost.exe", "System", "lsass.exe", "SearchIndexer.exe",
+        "MsMpEng.exe", "SenseIR.exe",
+        "CSFalconService.exe", "CSFalconServiceHost.exe"
+    )
+    | where InitiatingProcessAccountName !endswith "$"
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "Process: ",   InitiatingProcessFileName,
+        " | VectorDB Port: ", tostring(RemotePort),
+        " | CmdLine: ", InitiatingProcessCommandLine,
+        " | Parent: ", InitiatingProcessParentFileName
+    )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType  = "RAG Unusual Access",
+        TacticCategory = "Collection",
+        Evidence
+);
+
+// --- Signal 2: Bulk query — high connection count to vector DB port ---
+let bulk_access = materialize(
+    DeviceNetworkEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType == "ConnectionSuccess"
+    | where RemoteIP in ("127.0.0.1", "::1") or RemoteUrl startswith "localhost"
+    | where RemotePort in (vector_db_ports)
+    | where InitiatingProcessAccountName !endswith "$"
+    | summarize
+        ConnCount   = count(),
+        FirstSeen   = min(Timestamp),
+        AccountName = take_any(InitiatingProcessAccountName)
+        by DeviceName, InitiatingProcessFileName, RemotePort
+    | where ConnCount >= bulk_query_threshold
+    | extend Evidence = strcat(
+        "BulkQuery: ", InitiatingProcessFileName,
+        " | VectorDB Port: ", tostring(RemotePort),
+        " | ConnCount: ", tostring(ConnCount)
+    )
+    | extend Timestamp = FirstSeen
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType  = "RAG Unusual Access",
+        TacticCategory = "Collection",
+        Evidence
+);
+
+let all_suspicious = materialize(union unexpected_access, bulk_access);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

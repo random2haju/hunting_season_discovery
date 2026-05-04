@@ -1,0 +1,125 @@
+// ============================================================
+// AI Agent Binding to Unexpected Local Port (Agent IPC Abuse)
+// TacticCategory: LateralMovement
+// Source: DeviceNetworkEvents
+//
+// Legitimate AI agent frameworks communicate on predictable local
+// ports or via named pipes with their registered components.
+// An AI agent binding to or connecting to unexpected localhost
+// ports — especially high, non-standard, or well-known service
+// ports — may indicate:
+//   1. A compromised agent acting as a local proxy for lateral
+//      movement (attacker-controlled local relay)
+//   2. A malicious MCP server creating a local backdoor server
+//      that waits for connections from other tools
+//   3. An autonomous AI agent trying to pivot to other local
+//      services it discovers (RDP, SMB, WinRM via localhost)
+//   4. Agent self-replication: spinning up a second agent instance
+//      on an unusual port to maintain presence after a restart
+//
+// Signal: AI agent processes (or their direct children) making
+// ListenSuccess or ConnectionSuccess events to localhost on ports
+// outside the expected developer/AI tool port ranges.
+//
+// Expected AI/dev port ranges (excluded):
+//   - 3000-3010: typical dev servers (React, Next.js)
+//   - 5000, 5001: Flask/FastAPI defaults
+//   - 8000-8090: common HTTP dev servers
+//   - 11434: Ollama API
+//   - 1234: LM Studio
+//   - 4891: GPT4All
+//   - 5678: n8n automation
+//
+// FP Reduction:
+//   - Only localhost connections are evaluated (127.0.0.1 / ::1)
+//   - Known-good port ranges excluded
+//   - System processes excluded
+//   - First-seen baselining suppresses recurring developer servers
+//
+// Tuning:
+//   hunt_window          — how recent the reported events must be
+//   baseline_window      — total lookback including baseline period
+//   prevalence_threshold — suppress patterns seen on > N devices
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+
+// AI agent / framework processes to monitor
+let ai_agent_processes = dynamic([
+    "Claude.exe", "Cursor.exe", "windsurf.exe", "code.exe",
+    "ollama.exe", "python.exe", "node.exe"
+]);
+
+// High-risk service ports — an AI agent connecting to these locally
+// may indicate lateral movement reconnaissance or relay setup
+let sensitive_local_ports = dynamic([
+    445,    // SMB
+    3389,   // RDP
+    5985,   // WinRM HTTP
+    5986,   // WinRM HTTPS
+    22,     // SSH
+    23,     // Telnet
+    135,    // RPC
+    139,    // NetBIOS
+    636,    // LDAPS
+    389,    // LDAP
+    88,     // Kerberos
+    1433,   // MSSQL
+    3306,   // MySQL
+    5432,   // PostgreSQL
+    6379,   // Redis
+    27017   // MongoDB
+]);
+
+// Known-good localhost ports for AI/dev tools
+let safe_local_ports = dynamic([
+    3000, 3001, 3002, 3003, 3004, 3005,
+    4000, 4200,
+    5000, 5001,
+    8000, 8001, 8080, 8081, 8082, 8083, 8084, 8085, 8086, 8087, 8088, 8089, 8090,
+    11434,  // Ollama
+    1234,   // LM Studio
+    4891,   // GPT4All
+    5678,   // n8n
+    7860,   // Gradio
+    8501    // Streamlit
+]);
+
+let all_suspicious = materialize(
+    DeviceNetworkEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType in ("ConnectionSuccess", "ListeningConnectionCreated", "ConnectionAttempt")
+    | where RemoteIP in ("127.0.0.1", "::1", "0.0.0.0") or RemoteUrl startswith "localhost"
+    | where InitiatingProcessFileName in~ (ai_agent_processes)
+    | where RemotePort in (sensitive_local_ports)
+        or (RemotePort !in (safe_local_ports) and RemotePort > 1024 and RemotePort < 49152)
+    | where InitiatingProcessAccountName !endswith "$"
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "AgentProcess: ", InitiatingProcessFileName,
+        " | LocalPort: ",  tostring(RemotePort),
+        " | Action: ",     ActionType,
+        " | CmdLine: ",    InitiatingProcessCommandLine,
+        " | Parent: ",     InitiatingProcessParentFileName
+    )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType  = "Agent IPC Abuse",
+        TacticCategory = "LateralMovement",
+        Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

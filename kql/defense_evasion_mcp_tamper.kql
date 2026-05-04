@@ -1,0 +1,94 @@
+// ============================================================
+// MCP Configuration Tampered by Non-AI Process
+// TacticCategory: DefenseEvasion
+// Source: DeviceFileEvents
+//
+// MCP configuration files (claude_desktop_config.json, mcp.json)
+// control which tool servers the AI agent trusts and executes.
+// Tampering with these files is a high-confidence attack because:
+//   1. The AI client reads the config on every startup — a
+//      malicious entry persists silently until it is noticed
+//   2. Adding a rogue MCP server grants attacker-controlled code
+//      access to all tools the AI agent can invoke (files, shell,
+//      database, browser automation)
+//   3. Removing or corrupting entries disables legitimate security
+//      controls or audit tools registered as MCP servers
+//
+// This query is stricter than persistence_mcp_config.kql:
+//   - Legitimate AI clients (Claude.exe, Cursor.exe) are excluded
+//   - node.exe is only excluded when running under a known IDE
+//   - Any other process writing to MCP config is flagged regardless
+//     of path — the signal value is high enough to accept FPs here
+//
+// FP Reduction:
+//   - AI client processes and their direct npm/npx children excluded
+//   - Baseline suppresses already-observed patterns
+//   - Prevalence suppresses org-wide deployment tooling
+//
+// Tuning:
+//   hunt_window          — how recent the reported events must be
+//   baseline_window      — total lookback including baseline period
+//   prevalence_threshold — suppress patterns seen on > N devices
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+
+// Only the AI clients and their direct install helpers are allowed
+// to write MCP config — everything else is suspicious
+let allowed_writers = dynamic([
+    "Claude.exe", "Cursor.exe", "windsurf.exe"
+]);
+
+// node.exe / npm is OK only when running directly under a known IDE
+let ide_parents = dynamic([
+    "Code.exe", "Cursor.exe", "windsurf.exe", "Claude.exe",
+    "WindowsTerminal.exe", "wt.exe"
+]);
+
+let all_suspicious = materialize(
+    DeviceFileEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType in ("FileCreated", "FileModified", "FileRenamed")
+    | where FileName in~ ("claude_desktop_config.json", "mcp.json")
+    // Exclude the AI clients themselves
+    | where InitiatingProcessFileName !in~ (allowed_writers)
+    // Exclude node/npm running directly under an IDE
+    | where not (
+        InitiatingProcessFileName in~ ("node.exe", "npm.cmd", "npx.cmd")
+        and InitiatingProcessParentFileName in~ (ide_parents)
+    )
+    // Exclude Windows system processes
+    | where InitiatingProcessFileName !in~ (
+        "svchost.exe", "System", "Registry", "TrustedInstaller.exe",
+        "SearchIndexer.exe", "MsMpEng.exe", "SenseIR.exe"
+    )
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "ConfigFile: ", FolderPath, "\\", FileName,
+        " | Action: ",  ActionType,
+        " | Writer: ",  InitiatingProcessFileName,
+        " | WPath: ",   InitiatingProcessFolderPath,
+        " | CmdLine: ", InitiatingProcessCommandLine,
+        " | Parent: ",  InitiatingProcessParentFileName
+    )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType  = "MCP Config Tampered",
+        TacticCategory = "DefenseEvasion",
+        Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

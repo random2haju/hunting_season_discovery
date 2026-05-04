@@ -1,0 +1,117 @@
+// ============================================================
+// MCP Server Making Unexpected Outbound Network Connection
+// TacticCategory: CommandAndControl
+// Source: DeviceNetworkEvents
+//
+// MCP (Model Context Protocol) servers communicate with their
+// parent AI client via local stdio or socket transport — they
+// have NO legitimate reason to make outbound internet connections
+// except to API endpoints they explicitly expose as tools
+// (e.g., a "fetch" server contacting a URL the agent requested,
+// or a browser automation server).
+//
+// Unexpected outbound connections from AI agent child processes
+// are a high-confidence indicator of:
+//   1. A malicious MCP server phoning home to attacker C2
+//   2. An MCP server that was prompt-injected into connecting
+//      to an attacker-controlled URL to exfiltrate context
+//   3. A compromised npm package used as an MCP server that
+//      ships a backdoor alongside its legitimate functionality
+//
+// This query detects child processes of known AI agents making
+// outbound HTTPS connections to destinations outside the
+// sanctioned AI provider domain list.
+//
+// FP Reduction:
+//   - Sanctioned AI provider domains whitelisted (the AI client
+//     itself connecting to Anthropic/OpenAI is expected)
+//   - Browsers excluded (legitimate user sessions)
+//   - First-seen baselining suppresses recurring approved fetches
+//   - Prevalence threshold suppresses org-wide tooling
+//
+// Tuning:
+//   hunt_window          — how recent the reported events must be
+//   baseline_window      — total lookback including baseline period
+//   prevalence_threshold — suppress patterns seen on > N devices
+//   Add approved MCP server destination domains to safe_domains
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+
+// AI agent client processes whose children are monitored
+let ai_agent_parents = dynamic([
+    "Claude.exe", "Cursor.exe", "windsurf.exe", "code.exe"
+]);
+
+// Sanctioned AI provider / developer domains — connections to these
+// are expected and are excluded
+let safe_domains = dynamic([
+    "anthropic.com",
+    "openai.com",
+    "api.openai.com",
+    "googleapis.com",
+    "azure.com",
+    "microsoft.com",
+    "github.com",
+    "githubusercontent.com",
+    "npmjs.com",
+    "registry.npmjs.org",
+    "pypi.org",
+    "python.org",
+    "huggingface.co",
+    "cursor.sh",
+    "codeium.com",
+    "copilot.microsoft.com"
+]);
+
+// Browser / system processes that legitimately make outbound connections
+let excluded_processes = dynamic([
+    "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe",
+    "svchost.exe", "lsass.exe", "wininit.exe", "services.exe",
+    "MsMpEng.exe", "mssense.exe",
+    "CSFalconService.exe", "CSFalconServiceHost.exe"
+]);
+
+let all_suspicious = materialize(
+    DeviceNetworkEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType == "ConnectionSuccess"
+    | where RemotePort in (80, 443, 8080, 8443)
+    // Initiated by a direct child of an AI agent (1-hop from agent parent)
+    | where InitiatingProcessParentFileName in~ (ai_agent_parents)
+    | where InitiatingProcessFileName !in~ (excluded_processes)
+    | where InitiatingProcessAccountName !endswith "$"
+    // Exclude connections to sanctioned domains
+    | where isnotempty(RemoteUrl)
+    | where not (RemoteUrl has_any (safe_domains))
+    // Also catch raw-IP connections (no hostname = more suspicious)
+    | extend Destination = iff(isnotempty(RemoteUrl), RemoteUrl, tostring(RemoteIP))
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "Process: ",   InitiatingProcessFileName,
+        " | Parent: ", InitiatingProcessParentFileName,
+        " | Dest: ",   Destination,
+        " | Port: ",   tostring(RemotePort),
+        " | CmdLine: ", InitiatingProcessCommandLine
+    )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType  = "MCP Unexpected Network",
+        TacticCategory = "CommandAndControl",
+        Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

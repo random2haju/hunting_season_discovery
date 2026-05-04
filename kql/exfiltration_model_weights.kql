@@ -1,0 +1,110 @@
+// ============================================================
+// AI Model Weight Exfiltration
+// TacticCategory: Exfiltration
+// Source: DeviceNetworkEvents + DeviceFileEvents
+//
+// Proprietary AI model weights represent significant intellectual
+// property — training runs can cost millions of dollars and months
+// of compute. A single model file (.safetensors, .gguf, .pt) can
+// encode capabilities that are difficult to rebuild.
+//
+// This query detects two exfiltration patterns:
+//   1. Large outbound transfers: processes making ConnectionSuccess
+//      to external IPs shortly after accessing model weight files
+//      (joined on device + process + 1-hour window)
+//   2. Suspicious model file reads: non-AI processes opening model
+//      weight files — unexpected readers indicate staging before
+//      exfiltration or reconnaissance of available models
+//
+// Model weight file extensions:
+//   .gguf / .ggml — llama.cpp format
+//   .safetensors  — HuggingFace safe serialization
+//   .pt / .pth    — PyTorch checkpoint
+//   .bin          — generic HuggingFace format (restricted to model dirs)
+//
+// FP Reduction:
+//   - Legitimate AI tools excluded as model file readers
+//   - .bin restricted to known model directory paths to avoid
+//     noise from generic binary files
+//   - System processes excluded
+//   - First-seen baselining suppresses recurring backup jobs
+//
+// Tuning:
+//   hunt_window          — how recent the reported events must be
+//   baseline_window      — total lookback including baseline period
+//   prevalence_threshold — suppress patterns seen on > N devices
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+
+// Known AI tool processes that legitimately read model weights
+let known_ai_readers = dynamic([
+    "ollama.exe", "llama-server.exe", "llama.exe",
+    "python.exe",   // fine-tuning, inference scripts
+    "lm-studio.exe", "lms.exe",
+    "gpt4all.exe",
+    "koboldcpp.exe", "koboldcpp_nocuda.exe",
+    "text-generation-webui.exe",
+    "jan.exe"
+]);
+
+// Model directory path fragments — used to narrow .bin scope
+let model_dir_paths = dynamic([
+    "\\models\\",
+    "\\.ollama\\",
+    "\\lm-studio\\",
+    "\\.cache\\huggingface\\",
+    "\\huggingface\\hub\\",
+    "\\GPT4All\\",
+    "\\koboldcpp\\",
+    "\\text-generation-webui\\models\\"
+]);
+
+// --- Signal: Non-AI processes reading model weight files ---
+let model_reads = materialize(
+    DeviceFileEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType == "FileRead"
+    | where (FileName endswith ".gguf"
+          or FileName endswith ".ggml"
+          or FileName endswith ".safetensors"
+          or FileName endswith ".pt"
+          or FileName endswith ".pth"
+          or (FileName endswith ".bin" and FolderPath has_any (model_dir_paths)))
+    | where InitiatingProcessFileName !in~ (known_ai_readers)
+    | where InitiatingProcessFileName !in~ (
+        "svchost.exe", "System", "Registry", "SearchIndexer.exe",
+        "MsMpEng.exe", "SenseIR.exe", "WinRAR.exe", "7z.exe"
+    )
+    | where InitiatingProcessAccountName !endswith "$"
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "ModelFile: ",  FolderPath, "\\", FileName,
+        " | Reader: ",  InitiatingProcessFileName,
+        " | RPath: ",   InitiatingProcessFolderPath,
+        " | CmdLine: ", InitiatingProcessCommandLine,
+        " | Parent: ",  InitiatingProcessParentFileName
+    )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType  = "AI Model Weight Exfiltration",
+        TacticCategory = "Exfiltration",
+        Evidence
+);
+
+let all_suspicious = materialize(model_reads);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

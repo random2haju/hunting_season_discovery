@@ -1,0 +1,99 @@
+// ============================================================
+// Unexpected High-Risk Process Spawned by AI Agent
+// TacticCategory: Execution
+// Source: DeviceProcessEvents
+//
+// AI agents (Claude Desktop, Cursor, VS Code with Copilot, local
+// agent frameworks) legitimately spawn shell processes to run code.
+// This is expected behavior. What is NOT expected is an AI agent
+// spawning processes that exhibit post-exploitation patterns:
+//   - Encoded payloads  (-enc, base64, IEX)
+//   - Credential-touching binaries (net user, reg.exe SAM hive)
+//   - Raw network tools invoked outside a developer context
+//     (certutil -urlcache, bitsadmin, direct curl to raw IP)
+//
+// Threat scenarios:
+//   1. Prompt injection — malicious content in a file or webpage
+//      causes the AI agent to run attacker-supplied commands
+//   2. Supply-chain compromise — a poisoned MCP server or agent
+//      framework update adds hidden tool calls
+//   3. Compromised AI session — stolen API key replays malicious
+//      agentic actions on an endpoint
+//
+// FP Reduction:
+//   - Low-risk developer patterns (git, npm, pip, make) are NOT
+//     caught — only high-risk post-exploitation indicators
+//   - First-seen baselining suppresses recurring developer commands
+//   - Prevalence threshold suppresses org-wide automation
+//
+// Tuning:
+//   hunt_window          — how recent the reported events must be
+//   baseline_window      — total lookback including baseline period
+//   prevalence_threshold — suppress patterns seen on > N devices
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+
+// AI agent processes that may spawn children
+let ai_agent_processes = dynamic([
+    "Claude.exe", "Cursor.exe", "windsurf.exe",
+    "code.exe",
+    "ollama.exe",
+    "python.exe"   // agent frameworks: CrewAI, AutoGen, LangChain
+]);
+
+// High-risk command-line indicators — these patterns in a child
+// process command line are the signal
+let high_risk_cmdline = dynamic([
+    "-EncodedCommand", "-enc ", " -e ",
+    "IEX", "Invoke-Expression",
+    "FromBase64String", "base64 -d", "base64 -D",
+    "certutil -decode", "certutil -urlcache",
+    "bitsadmin /transfer",
+    "DownloadString", "DownloadFile", "WebClient",
+    "net user /add", "net localgroup administrators",
+    "reg.exe save HKLM\\SAM",
+    "reg save hklm\\sam",
+    "lsass.exe",
+    "sekurlsa", "mimikatz",
+    "procdump", "dumpert",
+    "/dev/tcp",
+    "nc.exe -e", "ncat -e",
+    "schtasks /create", "at.exe"
+]);
+
+let all_suspicious = materialize(
+    DeviceProcessEvents
+    | where Timestamp > ago(baseline_window)
+    | where InitiatingProcessFileName in~ (ai_agent_processes)
+    | where ProcessCommandLine has_any (high_risk_cmdline)
+    | where InitiatingProcessAccountName !endswith "$"
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "Child: ",     FileName,
+        " | CmdLine: ", ProcessCommandLine,
+        " | Agent: ",  InitiatingProcessFileName,
+        " | AgPath: ", InitiatingProcessFolderPath,
+        " | Parent: ", InitiatingProcessParentFileName
+    )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType  = "Unexpected Agent Process Spawn",
+        TacticCategory = "Execution",
+        Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

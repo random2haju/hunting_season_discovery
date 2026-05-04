@@ -1,0 +1,124 @@
+// ============================================================
+// MCP Server Process Execution
+// TacticCategory: Execution
+// Source: DeviceProcessEvents
+//
+// Model Context Protocol (MCP) servers are child processes
+// spawned by AI clients (Claude Desktop, Cursor, VS Code) to
+// provide tools. A legitimate MCP server is typically:
+//   - npx @modelcontextprotocol/<server-name>
+//   - uvx mcp-server-<name>
+//   - A local binary registered in an MCP config file
+//
+// This query detects MCP server execution with two signals:
+//   1. AI agent parents spawning processes with MCP-indicating
+//      command-line patterns (--mcp, mcp-server, npx @mcp, uvx mcp)
+//   2. AI agent parents spawning processes from high-risk paths
+//      (AppData\Temp, Downloads, random user dirs) that are not
+//      part of the standard npm/uv MCP server install paths
+//
+// Threat scenarios:
+//   - Attacker plants a malicious binary in a path registered as
+//     an MCP server in claude_desktop_config.json — the AI client
+//     will execute it automatically on next startup
+//   - Prompt injection causes the AI agent to install and run a
+//     novel MCP server from an attacker-controlled URL
+//
+// FP Reduction:
+//   - Command-line patterns match MCP-specific strings; generic
+//     node.exe children of IDEs are not caught
+//   - First-seen baselining suppresses approved MCP servers after
+//     the first hunt run
+//   - Prevalence threshold suppresses org-wide tooling
+//
+// Tuning:
+//   hunt_window          — how recent the reported events must be
+//   baseline_window      — total lookback including baseline period
+//   prevalence_threshold — suppress patterns seen on > N devices
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+
+// AI agent client processes that spawn MCP server children
+let ai_agent_parents = dynamic([
+    "Claude.exe", "Cursor.exe", "windsurf.exe",
+    "code.exe",   // VS Code with MCP extension
+    "node.exe"    // Claude Code CLI (itself a node process)
+]);
+
+// MCP-specific command-line indicators
+let mcp_cmdline_indicators = dynamic([
+    "--mcp",
+    "mcp-server",
+    "mcp_server",
+    "@modelcontextprotocol",
+    "mcp-filesystem",
+    "mcp-git",
+    "mcp-fetch",
+    "mcp-brave",
+    "mcp-sequential",
+    "mcp-memory",
+    "uvx mcp",
+    "uvx mcp-"
+]);
+
+// Paths that indicate an unofficial / high-risk MCP server binary
+let suspicious_paths = dynamic([
+    "\\AppData\\Local\\Temp\\",
+    "\\AppData\\Roaming\\Temp\\",
+    "\\Downloads\\",
+    "\\Desktop\\",
+    "\\Public\\",
+    "\\ProgramData\\"
+]);
+
+// Known-good MCP install paths (npm global, uv tools, common IDE extension dirs)
+let safe_path_fragments = dynamic([
+    "\\node_modules\\",
+    "\\npm\\",
+    "\\uv\\",
+    "\\AppData\\Local\\uv\\",
+    "\\AppData\\Roaming\\npm\\",
+    "\\AppData\\Local\\Programs\\"
+]);
+
+let all_suspicious = materialize(
+    DeviceProcessEvents
+    | where Timestamp > ago(baseline_window)
+    | where InitiatingProcessFileName in~ (ai_agent_parents)
+    | where
+        // Signal 1: MCP-specific command line pattern
+        ProcessCommandLine has_any (mcp_cmdline_indicators)
+        // Signal 2: Process launched from suspicious path
+        or (FolderPath has_any (suspicious_paths)
+            and FolderPath !has_any (safe_path_fragments))
+    | where InitiatingProcessAccountName !endswith "$"
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "MCPProcess: ", FileName,
+        " | Path: ",    FolderPath,
+        " | CmdLine: ", ProcessCommandLine,
+        " | Parent: ",  InitiatingProcessFileName,
+        " | PPath: ",   InitiatingProcessFolderPath
+    )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType  = "MCP Server Execution",
+        TacticCategory = "Execution",
+        Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

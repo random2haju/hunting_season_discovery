@@ -1,0 +1,107 @@
+// ============================================================
+// MCP Server Installation Detected
+// TacticCategory: Persistence
+// Source: DeviceFileEvents
+//
+// Model Context Protocol (MCP) servers extend AI agents with
+// access to local files, databases, APIs, and OS commands.
+// Installing a malicious MCP server is functionally equivalent
+// to dropping a plugin that gives an AI agent a new capability —
+// it persists across AI client restarts and runs with the user's
+// full privileges.
+//
+// This query detects writes to the MCP configuration files used
+// by Claude Desktop, Cursor, and the generic MCP standard:
+//   - %APPDATA%\Claude\claude_desktop_config.json
+//   - %USERPROFILE%\.cursor\mcp.json
+//   - %USERPROFILE%\.mcp.json
+//   - Any path containing \mcp.json or \claude_desktop_config.json
+//
+// Legitimate writes by the AI client itself are excluded.
+// Writes by any other process — shell scripts, package installers,
+// malware — are treated as suspicious persistence activity.
+//
+// FP Reduction:
+//   - Known AI client processes excluded (Claude.exe, Cursor.exe,
+//     node.exe under an IDE parent for extension-managed config)
+//   - First-seen baselining suppresses sanctioned installs after
+//     the first hunt run
+//   - Prevalence threshold suppresses org-wide deployment tooling
+//
+// Tuning:
+//   hunt_window          — how recent the reported events must be
+//   baseline_window      — total lookback including baseline period
+//   prevalence_threshold — suppress patterns seen on > N devices
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 3d;
+let prevalence_threshold = 5;
+
+// AI client processes that legitimately write their own config files
+let known_ai_config_writers = dynamic([
+    "Claude.exe",        // Claude Desktop writing its own config
+    "Cursor.exe",        // Cursor IDE writing mcp.json
+    "windsurf.exe",      // Windsurf IDE
+    "node.exe",          // Extension manager / npm install within IDE
+    "npm.cmd",
+    "npx.cmd"
+]);
+
+// Parent processes that make node.exe/npm installs legitimate
+let ide_parents = dynamic([
+    "Code.exe", "Cursor.exe", "windsurf.exe", "Claude.exe",
+    "WindowsTerminal.exe", "wt.exe"
+]);
+
+let all_suspicious = materialize(
+    DeviceFileEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType in ("FileCreated", "FileModified")
+    | where FileName in~ ("claude_desktop_config.json", "mcp.json")
+        or FolderPath has_any (
+            "\\Claude\\",
+            "\\.cursor\\",
+            "\\.mcp\\"
+        )
+    // Keep only actual config file writes (not arbitrary files in broad dirs)
+    | where FileName in~ ("claude_desktop_config.json", "mcp.json")
+    // Exclude legitimate AI client writers
+    | where not (
+        InitiatingProcessFileName in~ (known_ai_config_writers)
+        and InitiatingProcessParentFileName in~ (ide_parents)
+    )
+    | where InitiatingProcessFileName !in~ (["Claude.exe", "Cursor.exe", "windsurf.exe"])
+    // Exclude system processes
+    | where InitiatingProcessFileName !in~ (
+        "svchost.exe", "System", "Registry",
+        "SearchIndexer.exe", "MsMpEng.exe", "SenseIR.exe"
+    )
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "ConfigFile: ", FolderPath, "\\", FileName,
+        " | Action: ",  ActionType,
+        " | Writer: ",  InitiatingProcessFileName,
+        " | WPath: ",   InitiatingProcessFolderPath,
+        " | CmdLine: ", InitiatingProcessCommandLine,
+        " | Parent: ",  InitiatingProcessParentFileName
+    )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType  = "MCP Server Installed",
+        TacticCategory = "Persistence",
+        Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc
