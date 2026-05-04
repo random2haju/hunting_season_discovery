@@ -159,6 +159,59 @@ def compute_context_multiplier(tier: str, context: str, cmdline_score: float, cf
     return max(round(tier_mult * dev_discount * cmdline_score, 3), 0.05)
 
 
+def classify_workflow_class(evidence_str: str, parsed_ev: dict, execution_context: str, cfg: dict) -> tuple:
+    """
+    Classify a scene's workflow context for eligibility gating and analyst routing.
+
+    Returns (workflow_class, reasons_str):
+      workflow_class: "AIWorkflow" | "DeveloperAutomation" | "Unknown"
+      reasons_str:    human-readable explanation included in the AI/Dev Outliers sheet
+
+    AIWorkflow fires when the evidence string, process name, or parent process name
+    contains known AI agent indicators (e.g. /.claude/ paths, claude.exe).
+    DeveloperAutomation fires when the parent is a known IDE/terminal but no AI
+    indicators are present.
+    """
+    wf_cfg           = cfg.get("workflow_classification", {})
+    ai_path_patterns = wf_cfg.get("ai_path_patterns", ["/.claude/", "\\.claude\\"])
+    ai_process_names = {n.lower() for n in wf_cfg.get("ai_process_names", ["claude", "claude.exe", "claude-code"])}
+    ai_parent_names  = {n.lower() for n in wf_cfg.get("ai_parent_names",  ["claude.exe", "claude-code", "claude"])}
+
+    ai_pairs = [
+        (pair[0].lower(), pair[1].lower())
+        for pair in wf_cfg.get("ai_process_parent_pairs", [["bash", "bash"]])
+        if len(pair) == 2
+    ]
+
+    reasons = []
+    process = parsed_ev.get("process", "").lower()
+    parent  = parsed_ev.get("parent",  "").lower()
+
+    if process in ai_process_names:
+        reasons.append(f"process={process}")
+    if parent in ai_parent_names:
+        reasons.append(f"parent={parent}")
+
+    for proc, par in ai_pairs:
+        if process == proc and parent == par:
+            reasons.append(f"process-parent pair {process}->{parent}")
+            break
+
+    ev_lower = (evidence_str or "").lower()
+    for pat in ai_path_patterns:
+        if pat.lower() in ev_lower:
+            reasons.append(f"path contains {pat}")
+            break
+
+    if reasons:
+        return "AIWorkflow", "; ".join(reasons)
+
+    if execution_context == "DeveloperTooling":
+        return "DeveloperAutomation", "parent is a known developer tool"
+
+    return "Unknown", ""
+
+
 # ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
@@ -274,6 +327,17 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
             "Suspicious", "Neutral"
         )
     )
+
+    # --- Workflow classification ---
+    # Runs after context classification so ExecutionContext is available.
+    # Produces WorkflowClass (AIWorkflow / DeveloperAutomation / Unknown) and a
+    # human-readable WorkflowReasons string used in analyst-facing output sheets.
+    wf_results = [
+        classify_workflow_class(ev, pe, ctx, cfg)
+        for ev, pe, ctx in zip(scenes["Evidence"], parsed_evs, scenes["ExecutionContext"])
+    ]
+    scenes["WorkflowClass"]   = [r[0] for r in wf_results]
+    scenes["WorkflowReasons"] = [r[1] for r in wf_results]
 
     scenes["DeviceName"] = scenes["DeviceName"].str.strip().str.lower()
     scenes["AccountName"] = scenes["AccountName"].str.strip().str.lower()
@@ -799,6 +863,110 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
     return seasons
 
 
+def enrich_seasons_with_workflow(
+    seasons: pd.DataFrame, entity_col: str, scenes: pd.DataFrame, cfg: dict
+) -> pd.DataFrame:
+    """
+    Add workflow classification and priority eligibility columns to a seasons DataFrame.
+
+    New columns:
+      PrimaryWorkflowClass  — dominant workflow class across the entity's scenes
+                              ("AIWorkflow" | "DeveloperAutomation" | "Operational")
+      AIWorkflowScenePct    — % of scenes classified as AIWorkflow
+      EligibleForPriority   — False when the entity is AI/Dev-dominated with < N tactics
+      ExclusionReason       — human-readable explanation for ineligible entities
+
+    Eligibility gate: entities whose scenes are dominated by AIWorkflow or DeveloperAutomation
+    AND have fewer than workflow_classification.priority_min_tactics_for_ai_dev distinct MITRE
+    tactics are excluded from Priority Investigation Cases and routed to AI/Dev Outliers.
+    """
+    min_tactics = int(cfg.get("workflow_classification", {}).get("priority_min_tactics_for_ai_dev", 2))
+
+    seasons = seasons.copy()
+    seasons["PrimaryWorkflowClass"] = "Operational"
+    seasons["AIWorkflowScenePct"]   = 0.0
+    seasons["EligibleForPriority"]  = True
+    seasons["ExclusionReason"]      = ""
+
+    if "WorkflowClass" not in scenes.columns:
+        return seasons
+
+    wf_counts = (
+        scenes.groupby([entity_col, "WorkflowClass"])
+        .size()
+        .unstack(fill_value=0)
+    )
+
+    for idx, row in seasons.iterrows():
+        entity = row[entity_col]
+        if entity not in wf_counts.index:
+            continue
+        counts = wf_counts.loc[entity]
+        total  = int(counts.sum())
+        if total == 0:
+            continue
+
+        ai_count  = int(counts.get("AIWorkflow", 0))
+        dev_count = int(counts.get("DeveloperAutomation", 0))
+        other     = total - ai_count - dev_count
+
+        ai_pct = round(ai_count / total * 100, 1)
+        seasons.at[idx, "AIWorkflowScenePct"] = ai_pct
+
+        # Dominant class: whichever automated class outnumbers all non-automated scenes
+        if ai_count > other:
+            primary = "AIWorkflow"
+        elif dev_count > other:
+            primary = "DeveloperAutomation"
+        else:
+            primary = "Operational"
+        seasons.at[idx, "PrimaryWorkflowClass"] = primary
+
+        # Hard eligibility gate
+        tactics = int(row["UniqueTactics"])
+        if primary in ("AIWorkflow", "DeveloperAutomation") and tactics < min_tactics:
+            seasons.at[idx, "EligibleForPriority"] = False
+            seasons.at[idx, "ExclusionReason"] = (
+                f"{primary} entity with {tactics} distinct MITRE tactic(s); "
+                f"minimum {min_tactics} required for priority ranking"
+            )
+
+    return seasons
+
+
+def build_priority_cases(device_seasons: pd.DataFrame, user_seasons: pd.DataFrame) -> pd.DataFrame:
+    """
+    Combine eligible device and user season rows into a ranked Priority Investigation Cases table.
+    Entities classified as AIWorkflow or DeveloperAutomation with fewer than the minimum required
+    distinct MITRE tactics are excluded and routed to the AI/Dev Outliers sheet instead.
+    """
+    def _prep(df, entity_type, entity_col):
+        elig = df["EligibleForPriority"].fillna(True).astype(bool) if "EligibleForPriority" in df.columns \
+               else pd.Series(True, index=df.index)
+        d = df[elig].copy()
+        d["EntityType"] = entity_type
+        return d.rename(columns={entity_col: "EntityName"})
+
+    combined = pd.concat(
+        [_prep(device_seasons, "Device", "DeviceName"),
+         _prep(user_seasons,   "User",   "AccountName")],
+        ignore_index=True,
+    )
+
+    if combined.empty:
+        return combined
+
+    priority_cols = [
+        "EntityType", "EntityName", "TotalRisk", "RiskPercentile",
+        "EpisodeCount", "TotalScenes", "UniqueTactics", "TacticSet",
+        "PrimaryWorkflowClass", "AIWorkflowScenePct",
+        "MaxEpisodeRisk", "FirstSeen", "LastSeen",
+        "ZScore", "IsNewHigh", "IsScoreSpike", "IsAdaptingTactics", "NewTactics",
+    ]
+    available = [c for c in priority_cols if c in combined.columns]
+    return combined[available].sort_values("TotalRisk", ascending=False).reset_index(drop=True)
+
+
 # ---------------------------------------------------------------------------
 # Attack chain detection
 # ---------------------------------------------------------------------------
@@ -1134,6 +1302,11 @@ def append_to_history(
                 TacticSet           TEXT    NOT NULL DEFAULT ''
             )
         """)
+        # Schema migration: add columns introduced in later versions if they are missing.
+        existing_cols = {r[1] for r in con.execute("PRAGMA table_info(hunt_history)").fetchall()}
+        if "TacticSet" not in existing_cols:
+            con.execute("ALTER TABLE hunt_history ADD COLUMN TacticSet TEXT NOT NULL DEFAULT ''")
+            print("  [HISTORY] Schema migrated: added TacticSet column")
         con.execute("""
             CREATE INDEX IF NOT EXISTS idx_entity
             ON hunt_history (EntityType, EntityName, RunTimestampEpoch DESC)
@@ -1331,6 +1504,11 @@ def generate_historical_anomalies(
         ignore_index=True,
     )
 
+    # Exclude ineligible (AI/Dev-dominated single-tactic) entities so they don't
+    # pollute the Historical Anomalies sheet — they go to AI/Dev Outliers instead.
+    if "EligibleForPriority" in combined.columns:
+        combined = combined[combined["EligibleForPriority"].fillna(True).astype(bool)]
+
     any_flag = combined[flag_cols].apply(
         lambda col: col.fillna(False).astype(bool)
     ).any(axis=1)
@@ -1369,6 +1547,7 @@ def write_excel(
     user_seasons: pd.DataFrame,
     attack_chains: pd.DataFrame,
     historical_anomalies: pd.DataFrame,
+    priority_cases: pd.DataFrame,
     tactic_weights: dict,
     cfg: dict,
 ):
@@ -1396,17 +1575,54 @@ def write_excel(
             if freeze_col:
                 ws.freeze_panes(1, freeze_col)
 
-        # 1. Device Seasons
+        # 1. Priority Investigation Cases — eligible entities only, ranked by TotalRisk.
+        #    Entities dominated by AIWorkflow or DeveloperAutomation with < 2 MITRE tactics
+        #    are excluded here and appear in the AI/Dev Outliers sheet instead.
+        write_sheet("Priority Cases", priority_cases)
+
+        # 2. Device Seasons — all devices (includes PrimaryWorkflowClass, EligibleForPriority)
         write_sheet("Device Seasons", device_seasons)
 
-        # 2. User Seasons
+        # 3. User Seasons
         write_sheet("User Seasons", user_seasons)
 
-        # 3. Historical Anomalies (entities whose score changed unusually vs. their own baseline)
+        # 4. Historical Anomalies — anomaly-flagged eligible entities only
         if not historical_anomalies.empty:
             write_sheet("Historical Anomalies", historical_anomalies)
 
-        # 4. Attack Chains
+        # 5. AI/Dev Automation Outliers — entities excluded from priority ranking
+        def _build_outliers():
+            def _prep_outlier(df, etype, ecol):
+                if "EligibleForPriority" not in df.columns:
+                    return pd.DataFrame()
+                mask = ~df["EligibleForPriority"].fillna(True).astype(bool)
+                d = df[mask].copy()
+                if d.empty:
+                    return pd.DataFrame()
+                d["EntityType"] = etype
+                return d.rename(columns={ecol: "EntityName"})
+            parts = [
+                _prep_outlier(device_seasons, "Device", "DeviceName"),
+                _prep_outlier(user_seasons,   "User",   "AccountName"),
+            ]
+            parts = [p for p in parts if not p.empty]
+            if not parts:
+                return pd.DataFrame()
+            merged = pd.concat(parts, ignore_index=True)
+            outlier_cols = [
+                "EntityType", "EntityName", "TotalRisk", "EpisodeCount", "TotalScenes",
+                "UniqueTactics", "TacticSet", "PrimaryWorkflowClass", "AIWorkflowScenePct",
+                "FirstSeen", "LastSeen", "ExclusionReason",
+            ]
+            return merged[[c for c in outlier_cols if c in merged.columns]].sort_values(
+                "TotalRisk", ascending=False
+            )
+
+        outliers = _build_outliers()
+        if not outliers.empty:
+            write_sheet("AI Dev Outliers", outliers)
+
+        # 6. Attack Chains
         write_sheet("Attack Chains", attack_chains)
 
         # Shared prevalence multiplier function used by both stacking sheets
@@ -1442,37 +1658,37 @@ def write_excel(
             stk["PrevalenceMultiplier"] = stk.apply(_stack_mult, axis=1)
             return stk
 
-        # 4. AI Threat Summary — Stacking Analysis filtered to AI-family detections only
+        # 7. AI Threat Summary — stacking filtered to AI-family detections only
         ai_scenes = scenes[scenes["Family"] == "AI"].copy()
         if not ai_scenes.empty:
             write_sheet("AI Threat Summary", _build_stacking(ai_scenes))
 
-        # 5. Stacking Analysis — all detections, rarest patterns first (primary analyst view)
-        # Groups by EvidenceNormalized (regex-normalised, or Drain3 template when clustering enabled)
+        # 8. Stacking Analysis — all detections, rarest patterns first
         write_sheet("Stacking Analysis", _build_stacking(scenes))
 
-        # 5. Episodes (device-centric)
+        # 9. Episodes (device-centric)
         write_sheet("Episodes", device_episodes)
 
-        # 6. Per-tactic sheets
+        # 10. Per-tactic sheets
         for tactic in sorted(tactic_weights.keys()):
             tactic_scenes = scenes[scenes["TacticCategory"] == tactic].copy()
             tactic_scenes = tactic_scenes.sort_values("Timestamp", ascending=False)
             export_cols = ["Timestamp", "DeviceName", "AccountName", "DetectionType",
-                           "TacticCategory", "Family", "BehaviorFamily", "TrustContext",
-                           "LolbinTrustTier", "ExecutionContext", "CommandLineRiskScore",
-                           "ContextMultiplier", "Evidence", "EnvDeviceCount",
-                           "PrevalenceMultiplier", "SourceFile"]
+                           "TacticCategory", "Family", "BehaviorFamily", "WorkflowClass",
+                           "TrustContext", "LolbinTrustTier", "ExecutionContext",
+                           "CommandLineRiskScore", "ContextMultiplier", "Evidence",
+                           "EnvDeviceCount", "PrevalenceMultiplier", "SourceFile"]
             tactic_scenes = tactic_scenes[[c for c in export_cols if c in tactic_scenes.columns]]
             write_sheet(tactic, tactic_scenes)
 
-        # 7. All Scenes
+        # 11. All Scenes — full detail including workflow classification for analyst drilling
         all_scenes = scenes.sort_values("Timestamp", ascending=False)
         export_cols = ["Timestamp", "DeviceName", "AccountName", "DetectionType",
-                       "TacticCategory", "Family", "BehaviorFamily", "TrustContext",
-                       "LolbinTrustTier", "ExecutionContext", "CommandLineRiskScore",
-                       "ContextMultiplier", "Evidence", "EnvDeviceCount",
-                       "PrevalenceMultiplier", "SourceFile"]
+                       "TacticCategory", "Family", "BehaviorFamily",
+                       "WorkflowClass", "WorkflowReasons",
+                       "TrustContext", "LolbinTrustTier", "ExecutionContext",
+                       "CommandLineRiskScore", "ContextMultiplier", "Evidence",
+                       "EnvDeviceCount", "PrevalenceMultiplier", "SourceFile"]
         all_scenes = all_scenes[[c for c in export_cols if c in all_scenes.columns]]
         write_sheet("All Scenes", all_scenes)
 
@@ -1535,6 +1751,16 @@ def main():
     user_seasons = build_seasons(user_episodes, "AccountName", tactic_weights, scenes, cfg)
     print(f"    Users in scope: {len(user_seasons)}")
 
+    print("[*] Classifying entity workflow context...")
+    device_seasons = enrich_seasons_with_workflow(device_seasons, "DeviceName", scenes, cfg)
+    user_seasons   = enrich_seasons_with_workflow(user_seasons,   "AccountName", scenes, cfg)
+    n_excluded = (
+        (~device_seasons["EligibleForPriority"].fillna(True).astype(bool)).sum() +
+        (~user_seasons["EligibleForPriority"].fillna(True).astype(bool)).sum()
+    )
+    if n_excluded:
+        print(f"    {n_excluded} entity/entities routed to AI/Dev Automation Outliers")
+
     print("[*] Detecting attack chains...")
     attack_chains = build_attack_chains(device_seasons, scenes, cfg)
     print(f"    Chains detected: {len(attack_chains)}")
@@ -1564,23 +1790,33 @@ def main():
         run_id, run_ts, cfg,
     )
 
+    print("[*] Building priority investigation cases...")
+    priority_cases = build_priority_cases(device_seasons, user_seasons)
+    print(f"    Priority cases: {len(priority_cases)}")
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = os.path.join(out_dir, f"threat_hunt_{timestamp}.xlsx")
     print(f"\n[*] Writing Excel workbook...")
     write_excel(output_path, scenes, device_episodes, device_seasons, user_seasons,
-                attack_chains, historical_anomalies, tactic_weights, cfg)
+                attack_chains, historical_anomalies, priority_cases, tactic_weights, cfg)
 
     # Summary to console
     print("\n" + "="*60)
-    print("SEASON SUMMARY — TOP DEVICES BY RISK")
+    print("PRIORITY INVESTIGATION CASES — TOP 10")
     print("="*60)
-    top = device_seasons.head(10)[["DeviceName", "EpisodeCount", "TotalRisk", "TotalScenes"]]
-    print(top.to_string(index=False))
+    if not priority_cases.empty:
+        disp_cols = [c for c in ["EntityType", "EntityName", "TotalRisk", "UniqueTactics",
+                                  "TacticSet", "PrimaryWorkflowClass"] if c in priority_cases.columns]
+        print(priority_cases.head(10)[disp_cols].to_string(index=False))
+    else:
+        print("  (none — all entities are AI/Dev workflow with a single MITRE tactic)")
 
     print("\n" + "="*60)
-    print("TOP DEVICES BY BEHAVIORAL DIVERSITY")
+    print("TOP DEVICES BY BEHAVIORAL DIVERSITY (eligible entities)")
     print("="*60)
-    top_div = device_seasons.sort_values("UniqueEvidenceCount", ascending=False).head(10)
+    elig_devices = device_seasons[device_seasons["EligibleForPriority"].fillna(True).astype(bool)] \
+        if "EligibleForPriority" in device_seasons.columns else device_seasons
+    top_div = elig_devices.sort_values("UniqueEvidenceCount", ascending=False).head(10)
     print(top_div[["DeviceName", "UniqueEvidenceCount", "UniqueDetectionTypes", "TotalRisk"]].to_string(index=False))
 
     if not attack_chains.empty:

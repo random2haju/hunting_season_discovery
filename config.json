@@ -163,6 +163,14 @@
     "variation_score_bonus":      1.15
   },
 
+  "workflow_classification": {
+    "ai_path_patterns":  ["/.claude/", "\\.claude\\"],
+    "ai_process_names":  ["claude", "claude.exe", "claude-code"],
+    "ai_parent_names":   ["claude.exe", "claude-code", "claude"],
+    "ai_process_parent_pairs": [["bash", "bash"]],
+    "priority_min_tactics_for_ai_dev": 2
+  },
+
   "history": {
     "enabled":                        true,
     "store_path":                     "output/hunt_history.db",

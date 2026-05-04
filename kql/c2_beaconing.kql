@@ -45,6 +45,7 @@ let excluded_processes = dynamic([
     // AV / EDR sensors
     "mssense.exe", "msmpeng.exe", "nissrv.exe", "mpcmdrun.exe",
     "sense.exe", "cb.exe", "CylanceSvc.exe",
+    "CSFalconService.exe", "CSFalconServiceHost.exe", "cswindiag.exe",
     // Developer / cloud tooling
     "code.exe", "cursor.exe", "node.exe", "git.exe", "gh.exe",
     "awscli.exe", "az.exe", "gcloud.exe",

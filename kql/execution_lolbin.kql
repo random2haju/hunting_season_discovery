@@ -84,19 +84,22 @@ let all_suspicious = materialize(
         or (FileName =~ "bash.exe" and ProcessCommandLine has_any (
             "-c ", "curl", "wget", "nc ", "python", "perl", "ruby",
             "/dev/tcp", "chmod +x", "base64"
-        ) and InitiatingProcessFileName !in~ (ide_parents))
+        ) and InitiatingProcessFileName !in~ (ide_parents)
+          and InitiatingProcessParentFileName !in~ (ide_parents))
         or (FileName =~ "cmd.exe" and ProcessCommandLine has_any (
             "powershell -e", "powershell -enc", "powershell -w hidden",
             "certutil", "bitsadmin", "regsvr32",
             "\\\\", "http://", "https://"
-        ) and InitiatingProcessFileName !in~ (ide_parents))
+        ) and InitiatingProcessFileName !in~ (ide_parents)
+          and InitiatingProcessParentFileName !in~ (ide_parents))
         or (FileName =~ "powershell.exe" and ProcessCommandLine has_any (
             "-EncodedCommand", "-enc ", "-e ",
             "IEX", "Invoke-Expression",
             "DownloadString", "DownloadFile", "WebClient",
             "-exec bypass", "-ExecutionPolicy bypass",
             "FromBase64String"
-        ) and InitiatingProcessFileName !in~ (ide_parents))
+        ) and InitiatingProcessFileName !in~ (ide_parents)
+          and InitiatingProcessParentFileName !in~ (ide_parents))
         or (FileName =~ "msdt.exe" and ProcessCommandLine has_any (
             "ms-msdt:", "PCWDiagnostic", "IT_BrowseForFile", "IT_LaunchMethod"
         ))

@@ -43,8 +43,10 @@ let all_suspicious = materialize(
     | where
         RegistryKey has_any (exclusion_paths)
         or (RegistryKey has_any (disable_paths) and RegistryValueName has_any (disable_values))
-    // Exclude known management tools — add as needed
-    // | where InitiatingProcessFileName !in~ ("MpCmdRun.exe", "ConfigSecurityPolicy.exe")
+    | where InitiatingProcessFileName !in~ (
+        "MpCmdRun.exe", "ConfigSecurityPolicy.exe",
+        "CSFalconService.exe", "CSFalconServiceHost.exe", "cswindiag.exe"
+    )
     | extend AccountName = InitiatingProcessAccountName
     | extend Evidence = strcat(
         "RegKey: ", RegistryKey,

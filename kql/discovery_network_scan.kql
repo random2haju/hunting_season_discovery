@@ -33,7 +33,8 @@ let admin_processes = dynamic([
     "mmc.exe", "wsmprovhost.exe",
     "dfsr.exe", "dfsrs.exe",
     "veeam.endpointbackup.exe", "backup.exe",
-    "svchost.exe", "lsass.exe", "services.exe", "wininit.exe"
+    "svchost.exe", "lsass.exe", "services.exe", "wininit.exe",
+    "CSFalconService.exe", "CSFalconServiceHost.exe"
 ]);
 
 let all_suspicious = materialize(

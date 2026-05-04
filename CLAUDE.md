@@ -8,11 +8,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Standard run — reads from data/, writes Excel to output/
 python consolidate.py
 
+# Scheduled run (self-gates: skips weekends, enforces min 3-day interval)
+python run_hunt.py
+
+# Force a run regardless of schedule
+python run_hunt.py --force
+
 # Custom paths
 python consolidate.py --data-dir data/ --config config.json --out output/
 ```
 
 Dependencies: `pandas`, `xlsxwriter`, `drain3` (optional, for evidence clustering). Install with `pip install pandas xlsxwriter drain3`.
+
+### Scheduling (Windows Task Scheduler)
+Set up a daily trigger pointing to `python run_hunt.py`. The script skips Saturday/Sunday and enforces the `--min-days` interval (default 3) via `output/last_run.txt`. Use `--min-days 2` if you want Mon/Wed/Fri cadence instead.
 
 ## How the system works
 
@@ -41,7 +50,18 @@ Pipeline order: `load_scenes` → `apply_prevalence_scoring` → `assign_episode
 `apply_prevalence_scoring()` adjusts each scene's `ScoreContribution` using per-`Evidence` device counts (not per `DetectionType` — that would incorrectly collapse all LOLBin hits into one bucket). Thresholds and multipliers live in `config.json`.
 
 ### Excel output structure
-Sheets in order: Device Seasons → User Seasons → Attack Chains → **Stacking Analysis** → Episodes → per-tactic sheets → All Scenes. The **Stacking Analysis** sheet is the primary analyst view — patterns sorted by `EnvDeviceCount` ascending (rarest first).
+Sheets in order:
+1. **Priority Cases** — primary analyst view; eligible entities only, ranked by `TotalRisk`. AI/Dev-dominated single-tactic entities are excluded here.
+2. **Device Seasons** — all devices including `PrimaryWorkflowClass`, `EligibleForPriority`, `ExclusionReason` columns.
+3. **User Seasons** — same as Device Seasons but user-centric.
+4. **Historical Anomalies** — anomaly-flagged eligible entities (Z-score spikes, new highs, tactic expansion). Ineligible entities filtered out.
+5. **AI Dev Outliers** — entities excluded from priority ranking because they are AI/Dev-workflow-dominated with fewer than `priority_min_tactics_for_ai_dev` (default 2) distinct MITRE tactics. Includes `ExclusionReason` column.
+6. **Attack Chains** — cross-device lateral movement chains.
+7. **AI Threat Summary** — stacking view filtered to AI-family detections.
+8. **Stacking Analysis** — all detections, patterns sorted by `EnvDeviceCount` ascending (rarest first).
+9. **Episodes** — device-centric episode detail.
+10. Per-tactic sheets — one sheet per MITRE tactic.
+11. **All Scenes** — full raw scene list with `WorkflowClass` and `WorkflowReasons` columns.
 
 ## Adding a new detection
 
@@ -83,6 +103,10 @@ New tactic categories not already in `config.json` will score as 1 and log a war
 | `adaptive_behavior.variation_score_bonus` | Multiplicative bonus applied to `EpisodeRiskScore` when at least one variation cluster is detected (default 1.15 = +15%). Intentionally small to surface adaptive episodes slightly higher without overriding tactic weight or prevalence. Raise to 1.3–1.5 in high-confidence environments. |
 | `attack_chain_hygiene.fan_out_threshold` | Accounts appearing on ≥ N devices within a chain are flagged `IsFanOut=True` (default 3). Adds `IsFanOut` and `MaxAccountFanOut` columns to Attack Chains sheet. |
 | `season_diminishing_returns` | Controls the season TotalRisk formula. `diminishing_log_base`=2.0 (rank weight = 1/log2(rank+2)), `same_family_decay_after`=1, `same_family_decay_factor`=0.5 (2nd same-family episode = 0.5×, 3rd = 0.25×). |
+| `workflow_classification.ai_path_patterns` | Evidence strings containing these substrings (e.g. `/.claude/`) mark a scene as `AIWorkflow` |
+| `workflow_classification.ai_process_names` | Process names (e.g. `claude.exe`) that indicate an AI agent scene |
+| `workflow_classification.ai_parent_names` | Parent process names that indicate an AI agent launched the child process |
+| `workflow_classification.priority_min_tactics_for_ai_dev` | AIWorkflow/DeveloperAutomation entities need at least this many distinct MITRE tactics to appear in Priority Cases (default 2) |
 | `history.enabled` | Toggle historical analysis on/off (default true). When false the script behaves exactly as before this feature was added. |
 | `history.store_path` | Path to the SQLite history file relative to the script directory (default `output/hunt_history.db`). |
 | `history.minimum_runs_for_baseline` | Minimum prior runs required before IsNewHigh / IsScoreSpike / IsTacticExpansion can fire (default 3). Prevents noisy flags from thin baselines. |
