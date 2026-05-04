@@ -174,11 +174,20 @@ def classify_workflow_class(evidence_str: str, parsed_ev: dict, execution_contex
     """
     wf_cfg           = cfg.get("workflow_classification", {})
     ai_path_patterns = wf_cfg.get("ai_path_patterns", ["/.claude/", "\\.claude\\"])
-    ai_process_names = {n.lower() for n in wf_cfg.get("ai_process_names", ["claude", "claude.exe", "claude-code"])}
-    ai_parent_names  = {n.lower() for n in wf_cfg.get("ai_parent_names",  ["claude.exe", "claude-code", "claude"])}
+
+    def _stem(name: str) -> str:
+        """Strip .exe/.cmd/.bat extension for comparison so 'bash' matches 'bash.exe'."""
+        n = name.lower()
+        for ext in (".exe", ".cmd", ".bat", ".sh"):
+            if n.endswith(ext):
+                return n[: -len(ext)]
+        return n
+
+    ai_process_stems = {_stem(n) for n in wf_cfg.get("ai_process_names", ["claude", "claude.exe", "claude-code"])}
+    ai_parent_stems  = {_stem(n) for n in wf_cfg.get("ai_parent_names",  ["claude.exe", "claude-code", "claude"])}
 
     ai_pairs = [
-        (pair[0].lower(), pair[1].lower())
+        (_stem(pair[0]), _stem(pair[1]))
         for pair in wf_cfg.get("ai_process_parent_pairs", [["bash", "bash"]])
         if len(pair) == 2
     ]
@@ -186,14 +195,16 @@ def classify_workflow_class(evidence_str: str, parsed_ev: dict, execution_contex
     reasons = []
     process = parsed_ev.get("process", "").lower()
     parent  = parsed_ev.get("parent",  "").lower()
+    process_stem = _stem(process)
+    parent_stem  = _stem(parent)
 
-    if process in ai_process_names:
+    if process_stem in ai_process_stems:
         reasons.append(f"process={process}")
-    if parent in ai_parent_names:
+    if parent_stem in ai_parent_stems:
         reasons.append(f"parent={parent}")
 
-    for proc, par in ai_pairs:
-        if process == proc and parent == par:
+    for proc_s, par_s in ai_pairs:
+        if process_stem == proc_s and parent_stem == par_s:
             reasons.append(f"process-parent pair {process}->{parent}")
             break
 
