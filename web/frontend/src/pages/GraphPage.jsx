@@ -9,7 +9,6 @@
 
 import React, { useEffect, useRef, useState } from 'react'
 import cytoscape from 'cytoscape'
-import cola from 'cytoscape-cola'
 import dagre from 'cytoscape-dagre'
 import {
   Button, Descriptions, Drawer, Select, Slider, Space, Spin, Tag, Typography,
@@ -20,7 +19,6 @@ import EmptyState from '../components/EmptyState'
 import { useEntityContextMenu } from '../components/EntityContextMenu'
 import { useApp } from '../context/AppContext'
 
-cytoscape.use(cola)
 cytoscape.use(dagre)
 
 const { Text } = Typography
@@ -82,14 +80,15 @@ function nodeSize(risk) {
 }
 
 function buildLayout(name) {
-  if (name === 'dagre')     return { name: 'dagre', rankDir: 'TB', animate: true }
+  if (name === 'dagre') return { name: 'dagre', rankDir: 'TB', animate: true }
   if (name === 'concentric') return {
     name: 'concentric',
     concentric: (n) => n.data('risk') ?? 0,
     levelWidth: () => 20,
     animate: true,
   }
-  return { name: 'cola', animate: true, randomize: false, maxSimulationTime: 3000 }
+  // cose is built-in to Cytoscape — no extension needed, no stack overflow risk
+  return { name: 'cose', animate: true, randomize: false, nodeRepulsion: 8000 }
 }
 
 export default function GraphPage() {
@@ -97,7 +96,8 @@ export default function GraphPage() {
   const cyRef = useRef(null)
   const [graphData, setGraphData] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [layout, setLayout] = useState('cola')
+  const [cyError, setCyError] = useState(null)
+  const [layout, setLayout] = useState('cose')
   const [minRisk, setMinRisk] = useState(0)
   const [detailNode, setDetailNode] = useState(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
@@ -119,6 +119,7 @@ export default function GraphPage() {
     if (!containerRef.current || !graphData) return
 
     if (cyRef.current) cyRef.current.destroy()
+    setCyError(null)
 
     const visible = graphData.nodes.filter((n) => (n.risk ?? 0) >= minRisk)
     const visibleIds = new Set(visible.map((n) => n.id))
@@ -141,14 +142,21 @@ export default function GraphPage() {
       ...visibleEdges.map((e) => ({ data: e })),
     ]
 
-    const cy = cytoscape({
-      container: containerRef.current,
-      elements,
-      style: CY_STYLE,
-      layout: buildLayout(layout),
-      userZoomingEnabled: true,
-      userPanningEnabled: true,
-    })
+    let cy
+    try {
+      cy = cytoscape({
+        container: containerRef.current,
+        elements,
+        style: CY_STYLE,
+        layout: buildLayout(layout),
+        userZoomingEnabled: true,
+        userPanningEnabled: true,
+      })
+    } catch (err) {
+      console.error('Cytoscape init error:', err)
+      setCyError(err.message ?? String(err))
+      return
+    }
 
     cy.on('tap', 'node', (evt) => {
       cy.$('.selected').removeClass('selected')
@@ -209,7 +217,7 @@ export default function GraphPage() {
           size="small"
           style={{ width: 110 }}
           options={[
-            { value: 'cola',       label: 'Cola (default)' },
+            { value: 'cose',       label: 'Cose (default)' },
             { value: 'dagre',      label: 'Dagre' },
             { value: 'concentric', label: 'Concentric' },
           ]}
@@ -227,12 +235,24 @@ export default function GraphPage() {
         </Text>
       </Space>
 
-      {/* Cytoscape container */}
-      {loading ? (
+      {/* Cytoscape container — always mounted so ref is available after loading */}
+      {loading && (
         <Spin size="large" style={{ position: 'absolute', top: '50%', left: '50%' }} />
-      ) : (
-        <div ref={containerRef} style={{ width: '100%', height: '100%', background: '#0d0d0d' }} />
       )}
+      {cyError && (
+        <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+          color: '#ff4d4f', textAlign: 'center', padding: 24 }}>
+          <div style={{ fontWeight: 600, marginBottom: 8 }}>Graph failed to initialise</div>
+          <code style={{ fontSize: 12 }}>{cyError}</code>
+        </div>
+      )}
+      <div
+        ref={containerRef}
+        style={{
+          width: '100%', height: '100%', background: '#0d0d0d',
+          visibility: loading || cyError ? 'hidden' : 'visible',
+        }}
+      />
 
       {/* Node detail drawer */}
       <Drawer
