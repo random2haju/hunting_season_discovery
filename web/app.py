@@ -13,6 +13,7 @@ import webbrowser
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 # Ensure both the repo root (for consolidate.py) and web/ (for api/ + state.py) are importable
@@ -52,10 +53,18 @@ app.include_router(history_router, prefix="/api")
 app.include_router(stacking_router, prefix="/api")
 app.include_router(suppressions_router, prefix="/api")
 
-# Serve the built React bundle when it exists (production mode)
+# Serve the built React bundle when it exists (production mode).
+# Static assets (JS/CSS) are mounted at /assets; a catch-all route returns
+# index.html for every other non-API path so React Router handles navigation.
 _frontend_dist = os.path.join(_WEB_DIR, "frontend", "dist")
 if os.path.isdir(_frontend_dist):
-    app.mount("/", StaticFiles(directory=_frontend_dist, html=True), name="frontend")
+    _assets_dir = os.path.join(_frontend_dist, "assets")
+    if os.path.isdir(_assets_dir):
+        app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        return FileResponse(os.path.join(_frontend_dist, "index.html"))
 
 
 @app.on_event("startup")
