@@ -52,9 +52,11 @@ The `kql/` directory contains 15 standalone KQL queries, all targeting AI-specif
 Every query outputs exactly 6 columns: `Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence`. This contract must not be broken — the Python script validates it on load.
 
 Each KQL query has three tuning variables at the top:
-- `hunt_window` — how recent the reported events must be (default `1d`)
-- `baseline_window` — total lookback including baseline (default `3d`, stay under ~7d to avoid timeouts)
+- `hunt_window` — how recent the reported events must be (default `72h`; covers Mon/Wed/Fri cadence including full weekend gaps)
+- `baseline_window` — total lookback including baseline (default `7d`; safe ceiling for ADX — do not exceed without testing for timeouts)
 - `prevalence_threshold` — suppress patterns seen on more than this many devices (default `5`)
+
+Recommended run cadence: **Mon / Wed / Fri** with the 72h window. Monday's run covers the full weekend. Traditional queries (`execution_lolbin.kql`, `alerts_mde.kql`, etc.) retain their original defaults and are managed separately.
 
 ### Stage 2 — Python consolidation (`consolidate.py`)
 The script implements a **scenes → episodes → seasons** model:
@@ -70,17 +72,41 @@ Pipeline order: `load_scenes` → `apply_prevalence_scoring` → `assign_episode
 
 ### Excel output structure
 Sheets in order:
-1. **Priority Cases** — primary analyst view; eligible entities only, ranked by `TotalRisk`. AI/Dev-dominated single-tactic entities are excluded here.
-2. **Device Seasons** — all devices including `PrimaryWorkflowClass`, `EligibleForPriority`, `ExclusionReason` columns.
+1. **Priority Cases** — primary analyst view; eligible entities only, ranked by `TotalRisk`. AI/Dev-dominated single-tactic entities and analyst-suppressed entities are excluded here.
+2. **Device Seasons** — all devices including `PrimaryWorkflowClass`, `EligibleForPriority`, `ExclusionReason`, `IsSuppressed`, `SuppressReason` columns.
 3. **User Seasons** — same as Device Seasons but user-centric.
 4. **Historical Anomalies** — anomaly-flagged eligible entities (Z-score spikes, new highs, tactic expansion). Ineligible entities filtered out.
 5. **AI Dev Outliers** — entities excluded from priority ranking because they are AI/Dev-workflow-dominated with fewer than `priority_min_tactics_for_ai_dev` (default 2) distinct MITRE tactics. Includes `ExclusionReason` column.
-6. **Attack Chains** — cross-device lateral movement chains.
-7. **AI Threat Summary** — stacking view filtered to AI-family detections.
-8. **Stacking Analysis** — all detections, patterns sorted by `EnvDeviceCount` ascending (rarest first).
-9. **Episodes** — device-centric episode detail.
-10. Per-tactic sheets — one sheet per MITRE tactic.
-11. **All Scenes** — full raw scene list with `WorkflowClass` and `WorkflowReasons` columns.
+6. **Suppressed Entities** — analyst-dispositioned false positives excluded from Priority Cases. Shown for audit. Only present when suppressions exist.
+7. **Attack Chains** — cross-device lateral movement chains.
+8. **AI Threat Summary** — stacking view filtered to AI-family detections.
+9. **Stacking Analysis** — all detections, patterns sorted by `EnvDeviceCount` ascending (rarest first).
+10. **Episodes** — device-centric episode detail.
+11. Per-tactic sheets — one sheet per MITRE tactic.
+12. **All Scenes** — full raw scene list with `WorkflowClass` and `WorkflowReasons` columns.
+
+## Managing false-positive suppressions
+
+Use `suppress.py` to exclude known-benign entities from Priority Cases without deleting their data. Suppressed entities remain visible in Device/User Seasons sheets (with `IsSuppressed=True` and `SuppressReason`) and appear in a dedicated **Suppressed Entities** audit sheet.
+
+```bash
+# Suppress a device permanently
+python suppress.py add --type Device --name "LAPTOP-AI-DEV01" --reason "Known AI developer workstation"
+
+# Suppress a user account until a date (auto-reinstated after expiry)
+python suppress.py add --type User --name "svc-scanner" --reason "Automated scanner" --expires 2026-12-31
+
+# List all active suppressions
+python suppress.py list
+
+# Lift a suppression
+python suppress.py remove --type Device --name "LAPTOP-AI-DEV01"
+
+# Remove all expired entries
+python suppress.py expire
+```
+
+Suppressions are stored in `output/suppressions.csv` (gitignored). Expired entries are skipped automatically by `consolidate.py` — run `suppress.py expire` periodically to prune the file. The `suppression.store_path` config key controls the file location.
 
 ## Adding a new detection
 
@@ -124,6 +150,7 @@ New tactic categories not already in `config.json` will score as 1 and log a war
 | `workflow_classification.ai_process_names` | Process names (e.g. `claude.exe`) that indicate an AI agent scene |
 | `workflow_classification.ai_parent_names` | Parent process names that indicate an AI agent launched the child process |
 | `workflow_classification.priority_min_tactics_for_ai_dev` | AIWorkflow/DeveloperAutomation entities need at least this many distinct MITRE tactics to appear in Priority Cases (default 2) |
+| `suppression.store_path` | Path to the analyst suppression CSV relative to the script directory (default `output/suppressions.csv`). Managed via `suppress.py`. |
 | `history.enabled` | Toggle historical analysis on/off (default true). When false the script behaves exactly as before this feature was added. |
 | `history.store_path` | Path to the SQLite history file relative to the script directory (default `output/hunt_history.db`). |
 | `history.minimum_runs_for_baseline` | Minimum prior runs required before IsNewHigh / IsScoreSpike / IsTacticExpansion can fire (default 3). Prevents noisy flags from thin baselines. |
@@ -157,4 +184,4 @@ A **Historical Anomalies** sheet (3rd in the workbook, before Attack Chains) sur
 
 ## What stays out of git
 
-`data/*.csv`, `output/*.xlsx`, and `output/*.db` are gitignored — hunt results may contain sensitive telemetry and should never be committed.
+`data/*.csv`, `output/*.xlsx`, `output/*.db`, and `output/*.csv` (including `suppressions.csv`) are gitignored — hunt results and suppression lists may contain sensitive entity names and should never be committed.
