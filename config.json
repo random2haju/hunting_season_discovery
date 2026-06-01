@@ -207,6 +207,10 @@
     "priority_min_tactics_for_ai_dev": 2
   },
 
+  "suppression": {
+    "store_path": "output/suppressions.csv"
+  },
+
   "history": {
     "enabled":                        true,
     "store_path":                     "output/hunt_history.db",

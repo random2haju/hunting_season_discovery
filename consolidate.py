@@ -900,7 +900,9 @@ def build_priority_cases(device_seasons: pd.DataFrame, user_seasons: pd.DataFram
     def _prep(df, entity_type, entity_col):
         elig = df["EligibleForPriority"].fillna(True).astype(bool) if "EligibleForPriority" in df.columns \
                else pd.Series(True, index=df.index)
-        d = df[elig].copy()
+        supp = df["IsSuppressed"].fillna(False).astype(bool) if "IsSuppressed" in df.columns \
+               else pd.Series(False, index=df.index)
+        d = df[elig & ~supp].copy()
         d["EntityType"] = entity_type
         return d.rename(columns={entity_col: "EntityName"})
 
@@ -1061,6 +1063,35 @@ _HISTORY_COLS = [
     "HasMDEAlert", "CrossDeviceLink", "TopEpisodeScore", "TopTactic",
     "TacticSet",
 ]
+
+
+def load_suppressions(cfg: dict) -> dict:
+    """
+    Load analyst suppressions from CSV.
+    Returns {(EntityType, entity_name_lower): reason} for all active (non-expired) entries.
+    """
+    sup_cfg = cfg.get("suppression", {})
+    raw = sup_cfg.get("store_path", "output/suppressions.csv")
+    store_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), raw)
+    if not os.path.exists(store_path):
+        return {}
+    today = datetime.now(timezone.utc).date()
+    result = {}
+    try:
+        df = pd.read_csv(store_path, dtype=str).fillna("")
+        for _, row in df.iterrows():
+            expires = row.get("ExpiresDate", "").strip()
+            if expires:
+                try:
+                    if datetime.strptime(expires, "%Y-%m-%d").date() < today:
+                        continue
+                except ValueError:
+                    pass
+            key = (row["EntityType"].strip(), row["EntityName"].strip().lower())
+            result[key] = row.get("Reason", "").strip()
+    except Exception as exc:
+        print(f"  [WARN] Could not load suppressions from {store_path}: {exc}")
+    return result
 
 
 def _resolve_store_path(cfg: dict) -> str:
@@ -1501,6 +1532,7 @@ def write_excel(
     priority_cases: pd.DataFrame,
     tactic_weights: dict,
     cfg: dict,
+    suppressed_entities: "pd.DataFrame | None" = None,
 ):
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
         wb = writer.book
@@ -1573,7 +1605,11 @@ def write_excel(
         if not outliers.empty:
             write_sheet("AI Dev Outliers", outliers)
 
-        # 6. Attack Chains
+        # 6. Suppressed Entities — analyst-dispositioned FPs, shown for audit
+        if suppressed_entities is not None and not suppressed_entities.empty:
+            write_sheet("Suppressed Entities", suppressed_entities)
+
+        # 7. Attack Chains
         write_sheet("Attack Chains", attack_chains)
 
         # Shared prevalence multiplier function used by both stacking sheets
@@ -1609,15 +1645,15 @@ def write_excel(
             stk["PrevalenceMultiplier"] = stk.apply(_stack_mult, axis=1)
             return stk
 
-        # 7. AI Threat Summary — stacking filtered to AI-family detections only
+        # 8. AI Threat Summary — stacking filtered to AI-family detections only
         ai_scenes = scenes[scenes["Family"] == "AI"].copy()
         if not ai_scenes.empty:
             write_sheet("AI Threat Summary", _build_stacking(ai_scenes))
 
-        # 8. Stacking Analysis — all detections, rarest patterns first
+        # 9. Stacking Analysis — all detections, rarest patterns first
         write_sheet("Stacking Analysis", _build_stacking(scenes))
 
-        # 9. Episodes (device-centric)
+        # 10. Episodes (device-centric)
         write_sheet("Episodes", device_episodes)
 
         # 10. Per-tactic sheets
@@ -1712,6 +1748,25 @@ def main():
     if n_excluded:
         print(f"    {n_excluded} entity/entities routed to AI/Dev Automation Outliers")
 
+    print("[*] Loading analyst suppressions...")
+    suppressions = load_suppressions(cfg)
+    if suppressions:
+        print(f"    {len(suppressions)} active suppression(s) loaded")
+
+    def _apply_suppressions(seasons, entity_col, entity_type):
+        seasons = seasons.copy()
+        seasons["IsSuppressed"] = False
+        seasons["SuppressReason"] = ""
+        for idx, row in seasons.iterrows():
+            key = (entity_type, str(row[entity_col]).lower())
+            if key in suppressions:
+                seasons.at[idx, "IsSuppressed"] = True
+                seasons.at[idx, "SuppressReason"] = suppressions[key]
+        return seasons
+
+    device_seasons = _apply_suppressions(device_seasons, "DeviceName", "Device")
+    user_seasons   = _apply_suppressions(user_seasons,   "AccountName", "User")
+
     print("[*] Detecting attack chains...")
     attack_chains = build_attack_chains(device_seasons, scenes, cfg)
     print(f"    Chains detected: {len(attack_chains)}")
@@ -1745,11 +1800,36 @@ def main():
     priority_cases = build_priority_cases(device_seasons, user_seasons)
     print(f"    Priority cases: {len(priority_cases)}")
 
+    # Build suppressed entities view for audit sheet
+    def _build_suppressed(dev_df, usr_df):
+        cols = ["EntityType", "EntityName", "TotalRisk", "EpisodeCount", "TotalScenes",
+                "UniqueTactics", "TacticSet", "PrimaryWorkflowClass", "FirstSeen", "LastSeen",
+                "SuppressReason"]
+        parts = []
+        for df, etype, ecol in [(dev_df, "Device", "DeviceName"),
+                                (usr_df, "User",   "AccountName")]:
+            mask = df["IsSuppressed"].fillna(False).astype(bool) if "IsSuppressed" in df.columns \
+                   else pd.Series(False, index=df.index)
+            d = df[mask].copy()
+            if d.empty:
+                continue
+            d["EntityType"] = etype
+            d = d.rename(columns={ecol: "EntityName"})
+            parts.append(d[[c for c in cols if c in d.columns]])
+        if not parts:
+            return pd.DataFrame(columns=cols)
+        return pd.concat(parts, ignore_index=True).sort_values("TotalRisk", ascending=False)
+
+    suppressed_entities = _build_suppressed(device_seasons, user_seasons)
+    if not suppressed_entities.empty:
+        print(f"    {len(suppressed_entities)} suppressed entity/entities excluded from Priority Cases")
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = os.path.join(out_dir, f"threat_hunt_{timestamp}.xlsx")
     print(f"\n[*] Writing Excel workbook...")
     write_excel(output_path, scenes, device_episodes, device_seasons, user_seasons,
-                attack_chains, historical_anomalies, priority_cases, tactic_weights, cfg)
+                attack_chains, historical_anomalies, priority_cases, tactic_weights, cfg,
+                suppressed_entities=suppressed_entities)
 
     # Summary to console
     print("\n" + "="*60)
