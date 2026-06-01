@@ -16,6 +16,8 @@
 //   - %USERPROFILE%\.cursor\mcp.json
 //   - %USERPROFILE%\.mcp.json
 //   - Any path containing \mcp.json or \claude_desktop_config.json
+//   - %USERPROFILE%\.claude\settings.json (Claude Code hooks — CVE-2025-59536:
+//     injecting malicious hooks here grants RCE when a developer opens a project)
 //
 // Legitimate writes by the AI client itself are excluded.
 // Writes by any other process — shell scripts, package installers,
@@ -33,8 +35,8 @@
 //   baseline_window      — total lookback including baseline period
 //   prevalence_threshold — suppress patterns seen on > N devices
 // ============================================================
-let hunt_window          = 1d;
-let baseline_window      = 3d;
+let hunt_window          = 72h;
+let baseline_window      = 7d;
 let prevalence_threshold = 5;
 
 // AI client processes that legitimately write their own config files
@@ -58,13 +60,7 @@ let all_suspicious = materialize(
     | where Timestamp > ago(baseline_window)
     | where ActionType in ("FileCreated", "FileModified")
     | where FileName in~ ("claude_desktop_config.json", "mcp.json")
-        or FolderPath has_any (
-            "\\Claude\\",
-            "\\.cursor\\",
-            "\\.mcp\\"
-        )
-    // Keep only actual config file writes (not arbitrary files in broad dirs)
-    | where FileName in~ ("claude_desktop_config.json", "mcp.json")
+        or (FileName =~ "settings.json" and FolderPath has "\\.claude\\")
     // Exclude legitimate AI client writers
     | where not (
         InitiatingProcessFileName in~ (known_ai_config_writers)

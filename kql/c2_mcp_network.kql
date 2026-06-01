@@ -35,8 +35,8 @@
 //   prevalence_threshold — suppress patterns seen on > N devices
 //   Add approved MCP server destination domains to safe_domains
 // ============================================================
-let hunt_window          = 1d;
-let baseline_window      = 3d;
+let hunt_window          = 72h;
+let baseline_window      = 7d;
 let prevalence_threshold = 5;
 
 // AI agent client processes whose children are monitored

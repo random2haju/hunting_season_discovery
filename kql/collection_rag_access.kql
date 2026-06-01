@@ -38,8 +38,8 @@
 //   prevalence_threshold — suppress patterns seen on > N devices
 //   bulk_query_threshold — min connections to flag as bulk access
 // ============================================================
-let hunt_window          = 1d;
-let baseline_window      = 3d;
+let hunt_window          = 72h;
+let baseline_window      = 7d;
 let prevalence_threshold = 5;
 let bulk_query_threshold = 20;
 

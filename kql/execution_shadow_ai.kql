@@ -1,7 +1,7 @@
 // ============================================================
 // Shadow AI / Local LLM Tooling
 // TacticCategory: Execution
-// Source: DeviceProcessEvents + DeviceFileEvents
+// Source: DeviceProcessEvents + DeviceFileEvents + DeviceNetworkEvents
 //
 // Detects installation and execution of local AI inference tools.
 // Two scenarios:
@@ -9,10 +9,13 @@
 //   2. Attackers deploying local LLMs for payload generation or
 //      C2 command interpretation without touching AI APIs
 //
-// Two signals:
+// Three signals:
 //   1. Process execution of known local LLM binary names
 //   2. File creation of .gguf/.ggml model weight files in
 //      user-writable paths (indicates a model was downloaded)
+//   3. Non-Ollama process connecting to localhost:11434 (Ollama API) —
+//      catches usage of already-installed Ollama without a new execution
+//      event (175K exposed Ollama hosts globally, CVE-2026-7482 "Bleeding Llama")
 //
 // FP Reduction:
 //   - First-seen baselining: approved developer ollama installs
@@ -31,8 +34,8 @@
 //   baseline_window      — total lookback including baseline period
 //   prevalence_threshold — suppress patterns seen on > N devices
 // ============================================================
-let hunt_window          = 1d;
-let baseline_window      = 3d;
+let hunt_window          = 72h;
+let baseline_window      = 7d;
 let prevalence_threshold = 5;
 
 // Known local LLM tool binary names
@@ -93,8 +96,32 @@ let model_file_hits = materialize(
     | project Timestamp, DeviceName, AccountName, Evidence
 );
 
+// --- Signal 3: Non-Ollama process connecting to the Ollama API (localhost:11434) ---
+// Catches use of an already-installed Ollama instance that never fires a new process event.
+// Known AI/Ollama binaries and system processes are excluded; everything else is suspicious.
+let ollama_api_hits = materialize(
+    DeviceNetworkEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType in ("ConnectionSuccess", "ConnectionAttempt")
+    | where RemotePort == 11434
+    | where RemoteIP in ("127.0.0.1", "::1") or RemoteIP startswith "127."
+    | where InitiatingProcessFileName !in~ (shadow_ai_binaries)
+    | where InitiatingProcessFileName !in~ (
+        "svchost.exe", "System", "MsMpEng.exe", "SenseIR.exe",
+        "SearchIndexer.exe", "python.exe", "python3.exe"   // python excluded — legitimate Ollama client SDKs
+    )
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "OllamaAPIAccess: ", InitiatingProcessFileName,
+        " | Port: 11434",
+        " | CmdLine: ", InitiatingProcessCommandLine,
+        " | Parent: ", InitiatingProcessParentFileName
+    )
+    | project Timestamp, DeviceName, AccountName, Evidence
+);
+
 let all_suspicious = materialize(
-    union process_hits, model_file_hits
+    union process_hits, model_file_hits, ollama_api_hits
     | extend DetectionType  = "Shadow AI Tooling"
     | extend TacticCategory = "Execution"
     | project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
