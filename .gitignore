@@ -22,3 +22,10 @@ output/*.db-wal
 # OS
 .DS_Store
 Thumbs.db
+
+# Web dashboard — generated artefacts, not source
+web/frontend/node_modules/
+web/frontend/dist/
+web/frontend/.vite/
+web/__pycache__/
+web/api/__pycache__/
