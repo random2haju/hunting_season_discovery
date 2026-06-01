@@ -79,16 +79,18 @@ function nodeSize(risk) {
   return 16
 }
 
+const MAX_NODES = 200
+
 function buildLayout(name) {
-  if (name === 'dagre') return { name: 'dagre', rankDir: 'TB', animate: true }
+  // animate: false everywhere — cose physics blocks the main thread when animated
+  if (name === 'dagre') return { name: 'dagre', rankDir: 'TB', animate: false }
   if (name === 'concentric') return {
     name: 'concentric',
     concentric: (n) => n.data('risk') ?? 0,
     levelWidth: () => 20,
-    animate: true,
+    animate: false,
   }
-  // cose is built-in to Cytoscape — no extension needed, no stack overflow risk
-  return { name: 'cose', animate: true, randomize: false, nodeRepulsion: 8000 }
+  return { name: 'cose', animate: false, randomize: false, nodeRepulsion: 8000 }
 }
 
 export default function GraphPage() {
@@ -98,7 +100,8 @@ export default function GraphPage() {
   const [loading, setLoading] = useState(true)
   const [cyError, setCyError] = useState(null)
   const [layout, setLayout] = useState('cose')
-  const [minRisk, setMinRisk] = useState(0)
+  const [minRisk, setMinRisk] = useState(5)
+  const [capped, setCapped] = useState(false)
   const [detailNode, setDetailNode] = useState(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [contextMenu, setContextMenu] = useState({ open: false, x: 0, y: 0, node: null })
@@ -121,7 +124,13 @@ export default function GraphPage() {
     if (cyRef.current) cyRef.current.destroy()
     setCyError(null)
 
-    const visible = graphData.nodes.filter((n) => (n.risk ?? 0) >= minRisk)
+    // Sort by risk descending, cap at MAX_NODES to keep the layout responsive
+    let visible = graphData.nodes
+      .filter((n) => (n.risk ?? 0) >= minRisk)
+      .sort((a, b) => (b.risk ?? 0) - (a.risk ?? 0))
+    const wasCapped = visible.length > MAX_NODES
+    setCapped(wasCapped)
+    if (wasCapped) visible = visible.slice(0, MAX_NODES)
     const visibleIds = new Set(visible.map((n) => n.id))
     const visibleEdges = graphData.edges.filter(
       (e) => visibleIds.has(e.source) && visibleIds.has(e.target),
@@ -233,6 +242,11 @@ export default function GraphPage() {
         <Text style={{ fontSize: 11, color: '#888' }}>
           {nodeCount} nodes · {edgeCount} edges
         </Text>
+        {capped && (
+          <Text style={{ fontSize: 11, color: '#fa8c16' }}>
+            ⚠ showing top {MAX_NODES} — raise Min risk to see fewer
+          </Text>
+        )}
       </Space>
 
       {/* Cytoscape container — always mounted so ref is available after loading */}
