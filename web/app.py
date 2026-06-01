@@ -62,9 +62,15 @@ if os.path.isdir(_frontend_dist):
     if os.path.isdir(_assets_dir):
         app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
 
+    _index = os.path.join(_frontend_dist, "index.html")
+
+    @app.get("/", include_in_schema=False)
+    async def serve_root():
+        return FileResponse(_index)
+
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):
-        return FileResponse(os.path.join(_frontend_dist, "index.html"))
+        return FileResponse(_index)
 
 
 @app.on_event("startup")
