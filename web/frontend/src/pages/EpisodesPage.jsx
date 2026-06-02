@@ -3,7 +3,7 @@
  * Left panel: searchable device list.  Right panel: episode cards + scene table.
  */
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import {
   Col, Collapse, Empty, Input, List, Modal, Row, Segmented, Space, Spin, Table, Tag, Tooltip, Typography,
 } from 'antd'
@@ -235,31 +235,38 @@ export default function EpisodesPage() {
   const [loadingList, setLoadingList] = useState(true)
   const [loadingDetail, setLoadingDetail] = useState(false)
   const { pipelineStatus, selectedEntity, setSelectedEntity } = useApp()
+  // Holds a pending navigation target across the mode-change → list-reload cycle
+  const pendingNav = useRef(null)
 
-  // Load entity list when mode or data changes
+  // Load entity list when mode or data changes.
+  // If a navigation target is pending (cross-module jump), apply it after load
+  // instead of resetting selection — otherwise the mode-change effect would
+  // overwrite the selection set by navigation.
   useEffect(() => {
     setLoadingList(true)
-    setSelected(null)
-    setDetail(null)
     const req = mode === 'Device' ? api.allEpisodes() : api.allUserEpisodes()
     req.then(({ data: d }) => {
       const key = mode === 'Device' ? 'DeviceName' : 'AccountName'
       const entities = [...new Set((d?.data ?? []).map((r) => r[key]).filter(Boolean))].sort()
       setAllEntities(entities)
       setLoadingList(false)
+      if (pendingNav.current) {
+        setSelected(pendingNav.current)
+        pendingNav.current = null
+      } else {
+        setSelected(null)
+        setDetail(null)
+      }
     })
   }, [pipelineStatus.loaded_file, mode])
 
-  // Cross-module navigation
+  // Cross-module navigation — store target in ref before changing mode so the
+  // list-reload effect above can pick it up after the entity list is ready.
   useEffect(() => {
     if (!selectedEntity) return
-    if (selectedEntity.type === 'User') {
-      setMode('User')
-      setSelected(selectedEntity.name)
-    } else {
-      setMode('Device')
-      setSelected(selectedEntity.name)
-    }
+    const targetMode = selectedEntity.type === 'User' ? 'User' : 'Device'
+    pendingNav.current = selectedEntity.name
+    setMode(targetMode)
     setSelectedEntity(null)
   }, [selectedEntity, setSelectedEntity])
 
