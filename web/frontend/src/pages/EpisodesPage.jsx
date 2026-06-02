@@ -5,9 +5,9 @@
 
 import React, { useEffect, useState } from 'react'
 import {
-  Card, Col, Collapse, Empty, Input, List, Row, Space, Spin, Table, Tag, Typography,
+  Col, Collapse, Empty, Input, List, Modal, Row, Space, Spin, Table, Tag, Tooltip, Typography,
 } from 'antd'
-import { SearchOutlined } from '@ant-design/icons'
+import { CopyOutlined, SearchOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import EmptyState from '../components/EmptyState'
 import { useApp } from '../context/AppContext'
@@ -17,6 +17,100 @@ const { Text, Title } = Typography
 const RISK_COLOR = (v) =>
   v >= 50 ? '#ff4d4f' : v >= 20 ? '#fa8c16' : v >= 5 ? '#faad14' : '#52c41a'
 
+// Detect and decode PowerShell -EncodedCommand / -enc base64 blobs (UTF-16LE)
+const PS_ENC_RE = /-(?:EncodedCommand|enc(?:odedCommand)?)\s+([A-Za-z0-9+/]{20,}={0,2})/i
+
+function decodePS1(b64) {
+  try {
+    const binary = atob(b64)
+    let out = ''
+    for (let i = 0; i + 1 < binary.length; i += 2) {
+      out += String.fromCharCode(binary.charCodeAt(i) | (binary.charCodeAt(i + 1) << 8))
+    }
+    return out
+  } catch {
+    return null
+  }
+}
+
+function EvidenceCell({ value }) {
+  const [open, setOpen] = useState(false)
+  if (!value) return <Text style={{ fontSize: 11 }}>—</Text>
+
+  const match = PS_ENC_RE.exec(value)
+  const decoded = match ? decodePS1(match[1]) : null
+
+  const copyText = (text) => navigator.clipboard?.writeText(text)
+
+  return (
+    <>
+      <Space size={4} style={{ flexWrap: 'nowrap', maxWidth: '100%' }}>
+        <Text
+          style={{ fontSize: 11, cursor: 'pointer', maxWidth: 340, display: 'inline-block' }}
+          ellipsis
+          onClick={() => setOpen(true)}
+        >
+          {value}
+        </Text>
+        {decoded && (
+          <Tooltip title="Contains decoded PowerShell">
+            <Tag color="volcano" style={{ fontSize: 10, cursor: 'pointer', flexShrink: 0 }}
+              onClick={() => setOpen(true)}>PS1</Tag>
+          </Tooltip>
+        )}
+      </Space>
+
+      <Modal
+        open={open}
+        onCancel={() => setOpen(false)}
+        footer={null}
+        title="Evidence detail"
+        width={720}
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={12}>
+          <div>
+            <Space style={{ marginBottom: 4 }}>
+              <Text strong style={{ fontSize: 12 }}>Raw evidence</Text>
+              <Tooltip title="Copy">
+                <CopyOutlined style={{ cursor: 'pointer', color: '#888' }}
+                  onClick={() => copyText(value)} />
+              </Tooltip>
+            </Space>
+            <div style={{
+              background: '#141414', borderRadius: 4, padding: '8px 10px',
+              fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all',
+              whiteSpace: 'pre-wrap', maxHeight: 200, overflowY: 'auto',
+              border: '1px solid #303030',
+            }}>
+              {value}
+            </div>
+          </div>
+
+          {decoded && (
+            <div>
+              <Space style={{ marginBottom: 4 }}>
+                <Text strong style={{ fontSize: 12 }}>Decoded PowerShell</Text>
+                <Tooltip title="Copy">
+                  <CopyOutlined style={{ cursor: 'pointer', color: '#888' }}
+                    onClick={() => copyText(decoded)} />
+                </Tooltip>
+              </Space>
+              <div style={{
+                background: '#0d1117', borderRadius: 4, padding: '8px 10px',
+                fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all',
+                whiteSpace: 'pre-wrap', maxHeight: 300, overflowY: 'auto',
+                border: '1px solid #1a3a2a', color: '#7ee787',
+              }}>
+                {decoded}
+              </div>
+            </div>
+          )}
+        </Space>
+      </Modal>
+    </>
+  )
+}
+
 const SCENE_COLS = [
   { title: 'Timestamp', dataIndex: 'Timestamp', key: 'Timestamp', width: 160,
     render: (v) => v ? v.replace('T', ' ') : '—' },
@@ -24,8 +118,8 @@ const SCENE_COLS = [
   { title: 'Tactic', dataIndex: 'TacticCategory', key: 'TacticCategory', width: 130 },
   { title: 'Score', dataIndex: 'ScoreContribution', key: 'ScoreContribution', width: 70,
     render: (v) => v?.toFixed(2) ?? '—' },
-  { title: 'Evidence', dataIndex: 'Evidence', key: 'Evidence', ellipsis: true,
-    render: (v) => <Text style={{ fontSize: 11 }}>{v}</Text> },
+  { title: 'Evidence', dataIndex: 'Evidence', key: 'Evidence',
+    render: (v) => <EvidenceCell value={v} /> },
 ]
 
 function EpisodeCard({ ep, scenes }) {

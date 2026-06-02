@@ -342,6 +342,22 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
     scenes["WorkflowClass"]   = [r[0] for r in wf_results]
     scenes["WorkflowReasons"] = [r[1] for r in wf_results]
 
+    # AIWorkflow detection discounts — reduce ScoreContribution for scenes where
+    # the flagged behaviour is expected for AI agent workflows. Applied per
+    # DetectionType: only scenes already classified as AIWorkflow are affected.
+    # Scenes not listed in the map keep their score unchanged (multiplier = 1.0).
+    ai_wf_discounts = cfg.get("ai_workflow_detection_discounts", {})
+    if ai_wf_discounts:
+        ai_mask = scenes["WorkflowClass"] == "AIWorkflow"
+        if ai_mask.any():
+            discount_mult = scenes.loc[ai_mask, "DetectionType"].map(ai_wf_discounts).fillna(1.0)
+            scenes.loc[ai_mask, "ScoreContribution"] = (
+                scenes.loc[ai_mask, "ScoreContribution"] * discount_mult
+            ).round(2)
+            affected = int((discount_mult < 1.0).sum())
+            if affected:
+                print(f"  [WORKFLOW] AIWorkflow discount applied to {affected} scene(s)")
+
     scenes["DeviceName"] = scenes["DeviceName"].str.strip().str.lower()
     scenes["AccountName"] = scenes["AccountName"].str.strip().str.lower()
 

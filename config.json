@@ -142,7 +142,7 @@
     "C2 Beaconing":              "CommandAndControl",
     "AI Agent Memory Write":     "Persistence",
     "AI Data Exfiltration":      "DataExfiltration",
-    "AI API Key Read":           "CredentialDump",
+    "AI API Key Read":           "AIKeyAccess",
     "Jupyter Shell Execution":   "ShellExecution",
     "Shadow AI Tooling":         "ShellExecution",
     "MCP Server Installed":      "MCPAbuse",
@@ -163,6 +163,7 @@
     "Persistence":       0.7,
     "LateralMovement":   1.0,
     "CredentialDump":    1.0,
+    "AIKeyAccess":       0.2,
     "DataExfiltration":  1.0,
     "DefenseEvasion":    1.0,
     "CommandAndControl": 1.0,
@@ -197,6 +198,18 @@
   "adaptive_behavior": {
     "variation_cluster_min_size": 3,
     "variation_score_bonus":      1.15
+  },
+
+  "ai_workflow_detection_discounts": {
+    "AI Data Exfiltration":           0.05,
+    "Shadow AI Tooling":              0.1,
+    "AI Agent Memory Write":          0.1,
+    "MCP Server Execution":           0.2,
+    "MCP Server Installed":           0.2,
+    "Jupyter Shell Execution":        0.3,
+    "Unexpected Agent Process Spawn": 0.3,
+    "RAG Unusual Access":             0.3,
+    "AI API Key Read":                0.4
   },
 
   "workflow_classification": {

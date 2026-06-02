@@ -150,6 +150,7 @@ New tactic categories not already in `config.json` will score as 1 and log a war
 | `workflow_classification.ai_process_names` | Process names (e.g. `claude.exe`) that indicate an AI agent scene |
 | `workflow_classification.ai_parent_names` | Parent process names that indicate an AI agent launched the child process |
 | `workflow_classification.priority_min_tactics_for_ai_dev` | AIWorkflow/DeveloperAutomation entities need at least this many distinct MITRE tactics to appear in Priority Cases (default 2) |
+| `ai_workflow_detection_discounts` | Per-DetectionType score multiplier applied only to scenes classified as `AIWorkflow`. Reduces noise from detections that are expected behaviour for AI agents (e.g. Claude calling AI provider APIs triggers "AI Data Exfiltration" but is not suspicious). Detection types not listed keep their full score (1.0). High-severity detections (credential theft, persistence, MCP tampering) should not be discounted. |
 | `suppression.store_path` | Path to the analyst suppression CSV relative to the script directory (default `output/suppressions.csv`). Managed via `suppress.py`. |
 | `history.enabled` | Toggle historical analysis on/off (default true). When false the script behaves exactly as before this feature was added. |
 | `history.store_path` | Path to the SQLite history file relative to the script directory (default `output/hunt_history.db`). |
