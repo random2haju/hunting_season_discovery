@@ -106,6 +106,18 @@ const COLUMNS = [
     onFilter: (v, r) => r.PrimaryWorkflowClass === v,
   },
   {
+    title: 'AI%',
+    dataIndex: 'AIWorkflowScenePct',
+    key: 'AIWorkflowScenePct',
+    width: 60,
+    sorter: (a, b) => (a.AIWorkflowScenePct ?? 0) - (b.AIWorkflowScenePct ?? 0),
+    render: (v) => v != null ? (
+      <Text style={{ fontSize: 11, color: v === 0 ? '#ff4d4f' : v >= 50 ? '#52c41a' : '#fa8c16' }}>
+        {v}%
+      </Text>
+    ) : '—',
+  },
+  {
     title: 'Episodes',
     dataIndex: 'EpisodeCount',
     key: 'EpisodeCount',
