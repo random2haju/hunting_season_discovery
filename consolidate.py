@@ -1554,6 +1554,7 @@ def write_excel(
     output_path: str,
     scenes: pd.DataFrame,
     device_episodes: pd.DataFrame,
+    user_episodes: pd.DataFrame,
     device_seasons: pd.DataFrame,
     user_seasons: pd.DataFrame,
     attack_chains: pd.DataFrame,
@@ -1858,7 +1859,7 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = os.path.join(out_dir, f"threat_hunt_{timestamp}.xlsx")
     print(f"\n[*] Writing Excel workbook...")
-    write_excel(output_path, scenes, device_episodes, device_seasons, user_seasons,
+    write_excel(output_path, scenes, device_episodes, user_episodes, device_seasons, user_seasons,
                 attack_chains, historical_anomalies, priority_cases, tactic_weights, cfg,
                 suppressed_entities=suppressed_entities)
 
