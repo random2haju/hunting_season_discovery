@@ -1,9 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { Input, Radio, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import { SearchOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import EmptyState from '../components/EmptyState'
 import { useEntityContextMenu } from '../components/EntityContextMenu'
+import { useEntityDetailDrawer } from '../components/EntityDetailDrawer'
 import { useApp } from '../context/AppContext'
 
 const { Text } = Typography
@@ -135,7 +136,17 @@ export default function SeasonsPage() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const { pipelineStatus, selectedEntity, setSelectedEntity } = useApp()
-  const { onRow, contextMenuPortal, suppressModal } = useEntityContextMenu()
+  const { openDetail, entityDetailDrawer } = useEntityDetailDrawer()
+  const { onRow, contextMenuPortal, suppressModal } = useEntityContextMenu({ onViewDetails: openDetail })
+
+  const tableOnRow = useCallback(
+    (record) => ({
+      ...onRow(record),
+      onClick: () => openDetail(record),
+      style: { cursor: 'pointer' },
+    }),
+    [onRow, openDetail],
+  )
 
   useEffect(() => {
     setLoading(true)
@@ -175,6 +186,7 @@ export default function SeasonsPage() {
     <>
       {contextMenuPortal}
       {suppressModal}
+      {entityDetailDrawer}
       <Space style={{ marginBottom: 12 }}>
         <Radio.Group
           value={view}
@@ -205,7 +217,7 @@ export default function SeasonsPage() {
         loading={loading}
         size="small"
         pagination={{ pageSize: 50, showSizeChanger: true }}
-        onRow={onRow}
+        onRow={tableOnRow}
         scroll={{ x: 1100 }}
       />
     </>

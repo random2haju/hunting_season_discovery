@@ -17,6 +17,7 @@ import { DatePicker, Form, Input, Menu, message, Modal } from 'antd'
 import {
   ApartmentOutlined,
   EyeOutlined,
+  InfoCircleOutlined,
   StopOutlined,
 } from '@ant-design/icons'
 import { useApp } from '../context/AppContext'
@@ -32,7 +33,7 @@ function resolveEntity(record) {
   return { name, type }
 }
 
-export function useEntityContextMenu() {
+export function useEntityContextMenu({ onViewDetails } = {}) {
   const { navigateTo } = useApp()
   const [menu, setMenu] = useState({ open: false, x: 0, y: 0, record: null })
   const [suppressState, setSuppressState] = useState({ open: false, record: null })
@@ -61,6 +62,15 @@ export function useEntityContextMenu() {
   }, [form])
 
   const menuItems = [
+    ...(onViewDetails ? [{
+      key: 'details',
+      icon: <InfoCircleOutlined />,
+      label: 'View details',
+      onClick: () => {
+        onViewDetails(menu.record)
+        setMenu((m) => ({ ...m, open: false }))
+      },
+    }] : []),
     {
       key: 'suppress',
       icon: <StopOutlined />,
