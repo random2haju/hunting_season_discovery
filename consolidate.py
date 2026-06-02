@@ -293,6 +293,10 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
             * scenes["DetectionType"].map(dt_mult).fillna(1.0)
         ).round(1)
 
+    # Snapshot base score (tactic weight × detection_type_multiplier) before any
+    # context, workflow, or prevalence adjustments — used for score breakdown display.
+    scenes["BaseScore"] = scenes["ScoreContribution"].copy()
+
     # --- Context classification pipeline ---
     # Parses Evidence string once and derives LOLBin tier, parent context, and
     # command-line shape; combines them into a ContextMultiplier applied to ScoreContribution.
@@ -346,11 +350,13 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
     # the flagged behaviour is expected for AI agent workflows. Applied per
     # DetectionType: only scenes already classified as AIWorkflow are affected.
     # Scenes not listed in the map keep their score unchanged (multiplier = 1.0).
+    scenes["WorkflowMultiplier"] = 1.0
     ai_wf_discounts = cfg.get("ai_workflow_detection_discounts", {})
     if ai_wf_discounts:
         ai_mask = scenes["WorkflowClass"] == "AIWorkflow"
         if ai_mask.any():
             discount_mult = scenes.loc[ai_mask, "DetectionType"].map(ai_wf_discounts).fillna(1.0)
+            scenes.loc[ai_mask, "WorkflowMultiplier"] = discount_mult
             scenes.loc[ai_mask, "ScoreContribution"] = (
                 scenes.loc[ai_mask, "ScoreContribution"] * discount_mult
             ).round(2)
@@ -1690,8 +1696,9 @@ def write_excel(
                        "TacticCategory", "Family", "BehaviorFamily",
                        "WorkflowClass", "WorkflowReasons",
                        "TrustContext", "ExecutionTier", "ExecutionContext",
-                       "CommandLineRiskScore", "ContextMultiplier", "Evidence",
-                       "EnvDeviceCount", "PrevalenceMultiplier", "SourceFile"]
+                       "BaseScore", "CommandLineRiskScore", "ContextMultiplier",
+                       "WorkflowMultiplier", "PrevalenceMultiplier", "ScoreContribution",
+                       "Evidence", "EnvDeviceCount", "SourceFile"]
         all_scenes = all_scenes[[c for c in export_cols if c in all_scenes.columns]]
         write_sheet("All Scenes", all_scenes)
 

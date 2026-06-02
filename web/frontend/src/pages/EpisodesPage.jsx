@@ -111,13 +111,56 @@ function EvidenceCell({ value }) {
   )
 }
 
+function ScoreCell({ record }) {
+  const final = record.ScoreContribution
+  const base  = record.BaseScore
+  if (final == null) return <Text style={{ fontSize: 11 }}>—</Text>
+
+  const hasBreakdown = base != null
+  const rows = hasBreakdown ? [
+    { label: 'Base',        val: base,                             always: true },
+    { label: 'Context',     val: record.ContextMultiplier,         always: false },
+    { label: 'Workflow',    val: record.WorkflowMultiplier,        always: false },
+    { label: 'Prevalence',  val: record.PrevalenceMultiplier,      always: false },
+  ] : []
+
+  const content = hasBreakdown ? (
+    <div style={{ fontFamily: 'monospace', fontSize: 11, lineHeight: '1.8' }}>
+      {rows.filter(r => r.always || (r.val != null && r.val !== 1)).map(r => (
+        <div key={r.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 16 }}>
+          <span style={{ color: '#888' }}>{r.label}</span>
+          <span style={{ color: r.val < 1 ? '#fa8c16' : r.val > 1 ? '#52c41a' : '#aaa' }}>
+            {r.val?.toFixed(3) ?? '—'}
+          </span>
+        </div>
+      ))}
+      <div style={{ borderTop: '1px solid #303030', marginTop: 4, paddingTop: 4,
+                    display: 'flex', justifyContent: 'space-between', gap: 16 }}>
+        <span style={{ color: '#888' }}>Final</span>
+        <span style={{ color: '#fff', fontWeight: 600 }}>{final.toFixed(3)}</span>
+      </div>
+    </div>
+  ) : null
+
+  return hasBreakdown ? (
+    <Tooltip title={content} color="#1a1a1a" overlayInnerStyle={{ minWidth: 180 }}>
+      <Text style={{ fontSize: 11, cursor: 'default',
+                     color: final < (base ?? final) ? '#fa8c16' : undefined }}>
+        {final.toFixed(2)}
+      </Text>
+    </Tooltip>
+  ) : (
+    <Text style={{ fontSize: 11 }}>{final.toFixed(2)}</Text>
+  )
+}
+
 const SCENE_COLS = [
   { title: 'Timestamp', dataIndex: 'Timestamp', key: 'Timestamp', width: 160,
     render: (v) => v ? v.replace('T', ' ') : '—' },
   { title: 'Detection', dataIndex: 'DetectionType', key: 'DetectionType', ellipsis: true },
   { title: 'Tactic', dataIndex: 'TacticCategory', key: 'TacticCategory', width: 130 },
-  { title: 'Score', dataIndex: 'ScoreContribution', key: 'ScoreContribution', width: 70,
-    render: (v) => v?.toFixed(2) ?? '—' },
+  { title: 'Score', key: 'ScoreContribution', width: 70,
+    render: (_, record) => <ScoreCell record={record} /> },
   { title: 'Evidence', dataIndex: 'Evidence', key: 'Evidence',
     render: (v) => <EvidenceCell value={v} /> },
 ]
