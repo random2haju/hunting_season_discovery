@@ -681,10 +681,13 @@ def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict, 
 
         base_score = sum(adj_scores)
 
-        # Corroboration bonus: reward episodes with multiple distinct behavior families
+        # Corroboration bonus: reward episodes with multiple distinct behavior families.
+        # Suppressed for pure-AI episodes — AI detections span multiple MITRE tactics
+        # by design, not because an attacker is progressing through a kill chain.
         unique_fams = set(g["BehaviorFamily"].dropna()) - {"Unknown"}
         n_fams = len(unique_fams)
-        if n_fams >= min_fam:
+        ai_only = "Family" in g.columns and (g["Family"].fillna("Traditional") == "AI").all()
+        if n_fams >= min_fam and not ai_only:
             corr_mult = min(bonus_per ** (n_fams - min_fam + 1), max_bonus)
         else:
             corr_mult = 1.0
@@ -692,9 +695,13 @@ def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict, 
         # Dominant family = highest adjusted-score contributor (not alphabetically first)
         dominant_family = max(family_scores, key=family_scores.get) if family_scores else "Unknown"
 
-        # ATT&CK transition bonus: multiplicative reward for known kill-chain progressions
+        # ATT&CK transition bonus: multiplicative reward for known kill-chain progressions.
+        # Suppressed for pure-AI episodes for the same reason as corroboration above.
         tactics = g["TacticCategory"].unique().tolist()
-        transition_mult, transitions_found = compute_transition_bonus(set(tactics), cfg or {})
+        if ai_only:
+            transition_mult, transitions_found = 1.0, []
+        else:
+            transition_mult, transitions_found = compute_transition_bonus(set(tactics), cfg or {})
 
         # Variation clustering: detect try-and-adjust / AI-agent automated behavior
         var_clusters, largest_cluster, adaptive_flag, adaptive_reason = \
