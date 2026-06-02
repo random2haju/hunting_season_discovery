@@ -239,33 +239,37 @@ export default function EpisodesPage() {
   const pendingNav = useRef(null)
 
   // Load entity list when mode or data changes.
-  // If a navigation target is pending (cross-module jump), apply it after load
-  // instead of resetting selection — otherwise the mode-change effect would
-  // overwrite the selection set by navigation.
+  // pendingNav.current carries { name, mode } for cross-module jumps. We only
+  // consume it when the fetch that completes matches the target mode — the
+  // Device-mode fetch that was already in flight when navigation fired must not
+  // consume the User-mode pending target.
   useEffect(() => {
     setLoadingList(true)
-    const req = mode === 'Device' ? api.allEpisodes() : api.allUserEpisodes()
+    const fetchMode = mode
+    const req = fetchMode === 'Device' ? api.allEpisodes() : api.allUserEpisodes()
     req.then(({ data: d }) => {
-      const key = mode === 'Device' ? 'DeviceName' : 'AccountName'
+      const key = fetchMode === 'Device' ? 'DeviceName' : 'AccountName'
       const entities = [...new Set((d?.data ?? []).map((r) => r[key]).filter(Boolean))].sort()
       setAllEntities(entities)
       setLoadingList(false)
-      if (pendingNav.current) {
-        setSelected(pendingNav.current)
+      const nav = pendingNav.current
+      if (nav && nav.mode === fetchMode) {
         pendingNav.current = null
-      } else {
+        setSelected(nav.name)
+      } else if (!nav) {
         setSelected(null)
         setDetail(null)
       }
+      // nav exists but targets a different mode — leave it for that mode's fetch
     })
   }, [pipelineStatus.loaded_file, mode])
 
-  // Cross-module navigation — store target in ref before changing mode so the
-  // list-reload effect above can pick it up after the entity list is ready.
+  // Cross-module navigation — stash { name, mode } before changing mode so the
+  // correct fetch above can pick it up once its entity list is ready.
   useEffect(() => {
     if (!selectedEntity) return
     const targetMode = selectedEntity.type === 'User' ? 'User' : 'Device'
-    pendingNav.current = selectedEntity.name
+    pendingNav.current = { name: selectedEntity.name, mode: targetMode }
     setMode(targetMode)
     setSelectedEntity(null)
   }, [selectedEntity, setSelectedEntity])
