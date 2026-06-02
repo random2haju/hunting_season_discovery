@@ -1682,10 +1682,11 @@ def write_excel(
         # 9. Stacking Analysis — all detections, rarest patterns first
         write_sheet("Stacking Analysis", _build_stacking(scenes))
 
-        # 10. Episodes (device-centric)
+        # 10. Episodes (device-centric and user-centric)
         write_sheet("Episodes", device_episodes)
+        write_sheet("User Episodes", user_episodes)
 
-        # 10. Per-tactic sheets
+        # 11. Per-tactic sheets
         for tactic in sorted(tactic_weights.keys()):
             tactic_scenes = scenes[scenes["TacticCategory"] == tactic].copy()
             tactic_scenes = tactic_scenes.sort_values("Timestamp", ascending=False)

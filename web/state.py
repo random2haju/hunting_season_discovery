@@ -31,6 +31,7 @@ class AppState:
     device_seasons: Optional[pd.DataFrame] = None
     user_seasons: Optional[pd.DataFrame] = None
     device_episodes: Optional[pd.DataFrame] = None
+    user_episodes: Optional[pd.DataFrame] = None
     attack_chains: Optional[pd.DataFrame] = None
     historical_anomalies: Optional[pd.DataFrame] = None
     scenes: Optional[pd.DataFrame] = None
@@ -64,6 +65,7 @@ def load_from_excel(path: str) -> None:
     state.device_seasons = _read_sheet(xl, "Device Seasons")
     state.user_seasons = _read_sheet(xl, "User Seasons")
     state.device_episodes = _read_sheet(xl, "Episodes")
+    state.user_episodes   = _read_sheet(xl, "User Episodes")
     state.attack_chains = _read_sheet(xl, "Attack Chains")
     state.historical_anomalies = _read_sheet(xl, "Historical Anomalies")
     state.scenes = _read_sheet(xl, "All Scenes")
@@ -135,7 +137,8 @@ def _rebuild_priority_cases() -> None:
         "EpisodeCount", "TotalScenes", "UniqueTactics", "TacticSet",
         "PrimaryWorkflowClass", "AIWorkflowScenePct",
         "MaxEpisodeRisk", "FirstSeen", "LastSeen",
-        "ZScore", "IsNewHigh", "IsScoreSpike", "IsAdaptingTactics", "NewTactics",
+        "ZScore", "IsNewHigh", "IsScoreSpike", "IsTacticExpansion",
+        "IsAdaptingTactics", "IsEmergingEntity", "NewTactics",
     ]
 
     parts = []

@@ -5,7 +5,7 @@
 
 import React, { useEffect, useState } from 'react'
 import {
-  Col, Collapse, Empty, Input, List, Modal, Row, Space, Spin, Table, Tag, Tooltip, Typography,
+  Col, Collapse, Empty, Input, List, Modal, Row, Segmented, Space, Spin, Table, Tag, Tooltip, Typography,
 } from 'antd'
 import { CopyOutlined, SearchOutlined } from '@ant-design/icons'
 import { api } from '../api'
@@ -227,56 +227,77 @@ function EpisodeCard({ ep, scenes }) {
 }
 
 export default function EpisodesPage() {
-  const [allDevices, setAllDevices] = useState([])
-  const [deviceSearch, setDeviceSearch] = useState('')
-  const [selectedDevice, setSelectedDevice] = useState(null)
+  const [mode, setMode] = useState('Device')
+  const [allEntities, setAllEntities] = useState([])
+  const [entitySearch, setEntitySearch] = useState('')
+  const [selected, setSelected] = useState(null)
   const [detail, setDetail] = useState(null)
   const [loadingList, setLoadingList] = useState(true)
   const [loadingDetail, setLoadingDetail] = useState(false)
   const { pipelineStatus, selectedEntity, setSelectedEntity } = useApp()
 
-  // Load unique device list from episode summaries
+  // Load entity list when mode or data changes
   useEffect(() => {
     setLoadingList(true)
-    api.allEpisodes().then(({ data: d }) => {
-      const devices = [...new Set((d?.data ?? []).map((r) => r.DeviceName))].sort()
-      setAllDevices(devices)
+    setSelected(null)
+    setDetail(null)
+    const req = mode === 'Device' ? api.allEpisodes() : api.allUserEpisodes()
+    req.then(({ data: d }) => {
+      const key = mode === 'Device' ? 'DeviceName' : 'AccountName'
+      const entities = [...new Set((d?.data ?? []).map((r) => r[key]).filter(Boolean))].sort()
+      setAllEntities(entities)
       setLoadingList(false)
     })
-  }, [pipelineStatus.loaded_file])
+  }, [pipelineStatus.loaded_file, mode])
 
-  // Cross-module navigation: auto-select device
+  // Cross-module navigation
   useEffect(() => {
-    if (selectedEntity && selectedEntity.type !== 'User') {
-      setSelectedDevice(selectedEntity.name)
-      setSelectedEntity(null)
+    if (!selectedEntity) return
+    if (selectedEntity.type === 'User') {
+      setMode('User')
+      setSelected(selectedEntity.name)
+    } else {
+      setMode('Device')
+      setSelected(selectedEntity.name)
     }
+    setSelectedEntity(null)
   }, [selectedEntity, setSelectedEntity])
 
   useEffect(() => {
-    if (!selectedDevice) return
+    if (!selected) return
     setLoadingDetail(true)
-    api.deviceEpisodes(selectedDevice).then(({ data: d }) => {
+    const req = mode === 'Device' ? api.deviceEpisodes(selected) : api.userEpisodes(selected)
+    req.then(({ data: d }) => {
       setDetail(d)
       setLoadingDetail(false)
     })
-  }, [selectedDevice])
+  }, [selected, mode])
 
   if (!loadingList && !pipelineStatus.is_loaded) return <EmptyState />
 
-  const filteredDevices = deviceSearch
-    ? allDevices.filter((d) => d.toLowerCase().includes(deviceSearch.toLowerCase()))
-    : allDevices
+  const filtered = entitySearch
+    ? allEntities.filter((e) => e.toLowerCase().includes(entitySearch.toLowerCase()))
+    : allEntities
+
+  const placeholder = mode === 'Device' ? 'Select a device to view its episodes'
+                                        : 'Select a user to view their episodes'
 
   return (
     <Row gutter={16} style={{ height: 'calc(100vh - 120px)' }}>
-      {/* Device list */}
+      {/* Entity list */}
       <Col flex="220px" style={{ height: '100%', overflowY: 'auto' }}>
+        <Segmented
+          options={['Device', 'User']}
+          value={mode}
+          onChange={(v) => setMode(v)}
+          size="small"
+          style={{ marginBottom: 8, width: '100%' }}
+        />
         <Input
           prefix={<SearchOutlined />}
-          placeholder="Filter devices…"
-          value={deviceSearch}
-          onChange={(e) => setDeviceSearch(e.target.value)}
+          placeholder={`Filter ${mode.toLowerCase()}s…`}
+          value={entitySearch}
+          onChange={(e) => setEntitySearch(e.target.value)}
           allowClear
           size="small"
           style={{ marginBottom: 8 }}
@@ -286,18 +307,18 @@ export default function EpisodesPage() {
         ) : (
           <List
             size="small"
-            dataSource={filteredDevices}
-            renderItem={(d) => (
+            dataSource={filtered}
+            renderItem={(e) => (
               <List.Item
                 style={{
                   cursor: 'pointer',
                   padding: '6px 8px',
-                  background: d === selectedDevice ? '#1677ff22' : 'transparent',
+                  background: e === selected ? '#1677ff22' : 'transparent',
                   borderRadius: 4,
                 }}
-                onClick={() => setSelectedDevice(d)}
+                onClick={() => setSelected(e)}
               >
-                <Text code style={{ fontSize: 11 }}>{d}</Text>
+                <Text code style={{ fontSize: 11 }}>{e}</Text>
               </List.Item>
             )}
           />
@@ -306,16 +327,16 @@ export default function EpisodesPage() {
 
       {/* Episode timeline */}
       <Col flex="1" style={{ height: '100%', overflowY: 'auto' }}>
-        {!selectedDevice ? (
-          <Empty description="Select a device to view its episodes" />
+        {!selected ? (
+          <Empty description={placeholder} />
         ) : loadingDetail ? (
           <Spin />
         ) : !detail || detail.episodes.length === 0 ? (
-          <Empty description={`No episodes found for ${selectedDevice}`} />
+          <Empty description={`No episodes found for ${selected}`} />
         ) : (
           <>
             <Title level={5} style={{ marginBottom: 12 }}>
-              {selectedDevice} — {detail.episodes.length} episode{detail.episodes.length !== 1 ? 's' : ''}
+              {selected} — {detail.episodes.length} episode{detail.episodes.length !== 1 ? 's' : ''}
             </Title>
             {detail.episodes.map((ep, i) => (
               <EpisodeCard key={i} ep={ep} scenes={detail.scenes ?? []} />

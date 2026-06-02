@@ -57,6 +57,8 @@ export const api = {
   graph:             ()           => get('/graph'),
   allEpisodes:       ()           => get('/episodes'),
   deviceEpisodes:    (name)       => get(`/episodes/${encodeURIComponent(name)}`),
+  allUserEpisodes:   ()           => get('/user-episodes'),
+  userEpisodes:      (name)       => get(`/user-episodes/${encodeURIComponent(name)}`),
   historyList:       ()           => get('/history'),
   entityHistory:     (type, name) => get(`/history/${type}/${encodeURIComponent(name)}`),
   stacking:          (family)     => get(`/stacking?family=${family ?? 'all'}`),

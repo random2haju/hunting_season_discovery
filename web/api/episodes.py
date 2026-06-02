@@ -19,11 +19,7 @@ def get_all_episodes():
 
 @router.get("/episodes/{device_name:path}")
 def get_device_episodes(device_name: str):
-    """
-    Returns episode summaries and raw scenes for a single device.
-    Scenes are sorted ascending by Timestamp so the frontend can render
-    a chronological timeline.
-    """
+    """Returns episode summaries and raw scenes for a single device."""
     if not state.is_loaded:
         return {"episodes": [], "scenes": [], "loaded": False}
 
@@ -39,8 +35,32 @@ def get_device_episodes(device_name: str):
             state.scenes["DeviceName"].str.lower() == device_name.lower()
         ].sort_values("Timestamp", ascending=True)
 
-    return {
-        "episodes": df_to_records(eps),
-        "scenes": df_to_records(scenes),
-        "loaded": True,
-    }
+    return {"episodes": df_to_records(eps), "scenes": df_to_records(scenes), "loaded": True}
+
+
+@router.get("/user-episodes")
+def get_all_user_episodes():
+    if not state.is_loaded or state.user_episodes is None:
+        return {"data": [], "loaded": False}
+    return {"data": df_to_records(state.user_episodes), "loaded": True}
+
+
+@router.get("/user-episodes/{account_name:path}")
+def get_user_episodes(account_name: str):
+    """Returns episode summaries and raw scenes for a single user account."""
+    if not state.is_loaded:
+        return {"episodes": [], "scenes": [], "loaded": False}
+
+    eps: pd.DataFrame = pd.DataFrame()
+    if state.user_episodes is not None and not state.user_episodes.empty:
+        eps = state.user_episodes[
+            state.user_episodes["AccountName"].str.lower() == account_name.lower()
+        ]
+
+    scenes: pd.DataFrame = pd.DataFrame()
+    if state.scenes is not None and not state.scenes.empty:
+        scenes = state.scenes[
+            state.scenes["AccountName"].str.lower() == account_name.lower()
+        ].sort_values("Timestamp", ascending=True)
+
+    return {"episodes": df_to_records(eps), "scenes": df_to_records(scenes), "loaded": True}
