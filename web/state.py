@@ -79,19 +79,24 @@ def load_from_excel(path: str) -> None:
 
 def _apply_suppressions() -> None:
     """
-    Re-apply suppressions.csv to in-memory seasons and rebuild priority_cases.
-    Called after load_from_excel and after any suppression add/remove.
+    Re-apply entity and pattern suppressions to in-memory seasons, then rebuild priority_cases.
+    Called after load_from_excel and after any suppression/pattern add/remove.
     """
     suppressions = _load_suppression_map()
+    patterns = _load_active_patterns()
     if state.device_seasons is not None:
-        state.device_seasons = _stamp_suppressed(state.device_seasons, "DeviceName", "Device", suppressions)
+        state.device_seasons = _stamp_suppressed(
+            state.device_seasons, "DeviceName", "Device", suppressions, patterns
+        )
     if state.user_seasons is not None:
-        state.user_seasons = _stamp_suppressed(state.user_seasons, "AccountName", "User", suppressions)
+        state.user_seasons = _stamp_suppressed(
+            state.user_seasons, "AccountName", "User", suppressions, patterns
+        )
     _rebuild_priority_cases()
 
 
 def _load_suppression_map() -> dict:
-    """Return {(EntityType, entity_name_lower): reason} for active suppressions."""
+    """Return {(EntityType, entity_name_lower): reason} for active entity suppressions."""
     from datetime import datetime, timezone
     store_path = _suppression_store_path()
     if not os.path.exists(store_path):
@@ -115,15 +120,92 @@ def _load_suppression_map() -> dict:
     return result
 
 
-def _stamp_suppressed(df: pd.DataFrame, entity_col: str, entity_type: str, suppressions: dict) -> pd.DataFrame:
+def _load_active_patterns() -> list:
+    """Return active (non-expired) pattern suppression rules from JSON."""
+    from datetime import datetime
+    path = _pattern_store_path()
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            patterns = json.load(f)
+        today = datetime.now().date()
+        active = []
+        for p in patterns:
+            expires = p.get("expires_date") or ""
+            if expires:
+                try:
+                    if datetime.strptime(expires, "%Y-%m-%d").date() < today:
+                        continue
+                except ValueError:
+                    pass
+            active.append(p)
+        return active
+    except Exception:
+        return []
+
+
+def _evaluate_pattern(row: pd.Series, entity_type: str, pattern: dict) -> bool:
+    """Return True if this season row matches all conditions in the pattern (AND logic)."""
+    for cond in pattern.get("conditions", []):
+        field = cond["field"]
+        op    = cond["op"]
+        value = cond["value"]
+
+        if field == "EntityType":
+            row_val = entity_type
+        else:
+            row_val = row.get(field)
+            if row_val is None or (isinstance(row_val, float) and pd.isna(row_val)):
+                return False
+
+        try:
+            if field in ("UniqueTactics", "TotalRisk", "AIWorkflowScenePct"):
+                rv, cv = float(row_val), float(value)
+                if op == "="  and not (rv == cv): return False
+                if op == "<"  and not (rv <  cv): return False
+                if op == "<=" and not (rv <= cv): return False
+                if op == ">"  and not (rv >  cv): return False
+                if op == ">=" and not (rv >= cv): return False
+            else:
+                if str(row_val) != str(value):
+                    return False
+        except (ValueError, TypeError):
+            return False
+    return True
+
+
+def _format_pattern_reason(pattern: dict) -> str:
+    cond_strs = [f"{c['field']}{c['op']}{c['value']}" for c in pattern.get("conditions", [])]
+    return f"Pattern '{pattern['name']}': {pattern['reason']} [{', '.join(cond_strs)}]"
+
+
+def _stamp_suppressed(
+    df: pd.DataFrame,
+    entity_col: str,
+    entity_type: str,
+    suppressions: dict,
+    patterns: list,
+) -> pd.DataFrame:
     df = df.copy()
-    df["IsSuppressed"] = False
+    df["IsSuppressed"]  = False
     df["SuppressReason"] = ""
+    df["SuppressType"]  = ""
     for idx, row in df.iterrows():
+        # Entity suppression takes priority
         key = (entity_type, str(row[entity_col]).lower())
         if key in suppressions:
-            df.at[idx, "IsSuppressed"] = True
+            df.at[idx, "IsSuppressed"]   = True
             df.at[idx, "SuppressReason"] = suppressions[key]
+            df.at[idx, "SuppressType"]   = "Entity"
+            continue
+        # Pattern suppression (OR across patterns)
+        for pattern in patterns:
+            if _evaluate_pattern(row, entity_type, pattern):
+                df.at[idx, "IsSuppressed"]   = True
+                df.at[idx, "SuppressReason"] = _format_pattern_reason(pattern)
+                df.at[idx, "SuppressType"]   = "Pattern"
+                break
     return df
 
 
@@ -174,6 +256,16 @@ def _suppression_store_path() -> str:
         return os.path.join(ROOT_DIR, raw)
     except Exception:
         return os.path.join(OUTPUT_DIR, "suppressions.csv")
+
+
+def _pattern_store_path() -> str:
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg = json.load(f)
+        raw = cfg.get("suppression", {}).get("pattern_store_path", "output/pattern_suppressions.json")
+        return os.path.join(ROOT_DIR, raw)
+    except Exception:
+        return os.path.join(OUTPUT_DIR, "pattern_suppressions.json")
 
 
 def df_to_records(df: Optional[pd.DataFrame]) -> list:

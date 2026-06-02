@@ -139,7 +139,7 @@ export default function PriorityPage() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const { pipelineStatus } = useApp()
-  const { onRow, ContextMenuPortal, SuppressModal } = useEntityContextMenu()
+  const { onRow, contextMenuPortal, suppressModal } = useEntityContextMenu()
 
   useEffect(() => {
     setLoading(true)
@@ -163,8 +163,8 @@ export default function PriorityPage() {
 
   return (
     <>
-      <ContextMenuPortal />
-      <SuppressModal />
+      {contextMenuPortal}
+      {suppressModal}
       <Space style={{ marginBottom: 12 }}>
         <Input
           prefix={<SearchOutlined />}

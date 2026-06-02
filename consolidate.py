@@ -1094,6 +1094,71 @@ _HISTORY_COLS = [
 ]
 
 
+def load_pattern_suppressions(cfg: dict) -> list:
+    """
+    Load active (non-expired) pattern suppression rules from JSON.
+    Returns list of pattern dicts, each with: name, reason, conditions, expires_date.
+    """
+    sup_cfg = cfg.get("suppression", {})
+    raw = sup_cfg.get("pattern_store_path", "output/pattern_suppressions.json")
+    store_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), raw)
+    if not os.path.exists(store_path):
+        return []
+    today = datetime.now(timezone.utc).date()
+    try:
+        with open(store_path, encoding="utf-8") as f:
+            patterns = json.load(f)
+        active = []
+        for p in patterns:
+            expires = p.get("expires_date") or ""
+            if expires:
+                try:
+                    if datetime.strptime(expires, "%Y-%m-%d").date() < today:
+                        continue
+                except ValueError:
+                    pass
+            active.append(p)
+        return active
+    except Exception as exc:
+        print(f"  [WARN] Could not load pattern suppressions from {store_path}: {exc}")
+        return []
+
+
+def _evaluate_pattern(row: "pd.Series", entity_type: str, pattern: dict) -> bool:
+    """Return True if the season row matches all conditions (AND logic)."""
+    for cond in pattern.get("conditions", []):
+        field = cond["field"]
+        op    = cond["op"]
+        value = cond["value"]
+
+        if field == "EntityType":
+            row_val = entity_type
+        else:
+            row_val = row.get(field)
+            if row_val is None or (hasattr(row_val, "__float__") and row_val != row_val):
+                return False
+
+        try:
+            if field in ("UniqueTactics", "TotalRisk", "AIWorkflowScenePct"):
+                rv, cv = float(row_val), float(value)
+                if op == "="  and not (rv == cv): return False
+                if op == "<"  and not (rv <  cv): return False
+                if op == "<=" and not (rv <= cv): return False
+                if op == ">"  and not (rv >  cv): return False
+                if op == ">=" and not (rv >= cv): return False
+            else:
+                if str(row_val) != str(value):
+                    return False
+        except (ValueError, TypeError):
+            return False
+    return True
+
+
+def _format_pattern_reason(pattern: dict) -> str:
+    cond_strs = [f"{c['field']}{c['op']}{c['value']}" for c in pattern.get("conditions", [])]
+    return f"Pattern '{pattern['name']}': {pattern['reason']} [{', '.join(cond_strs)}]"
+
+
 def load_suppressions(cfg: dict) -> dict:
     """
     Load analyst suppressions from CSV.
@@ -1782,18 +1847,32 @@ def main():
 
     print("[*] Loading analyst suppressions...")
     suppressions = load_suppressions(cfg)
+    patterns     = load_pattern_suppressions(cfg)
     if suppressions:
-        print(f"    {len(suppressions)} active suppression(s) loaded")
+        print(f"    {len(suppressions)} active entity suppression(s) loaded")
+    if patterns:
+        print(f"    {len(patterns)} active pattern suppression(s) loaded")
 
     def _apply_suppressions(seasons, entity_col, entity_type):
         seasons = seasons.copy()
-        seasons["IsSuppressed"] = False
+        seasons["IsSuppressed"]  = False
         seasons["SuppressReason"] = ""
+        seasons["SuppressType"]  = ""
         for idx, row in seasons.iterrows():
+            # Entity suppression takes priority
             key = (entity_type, str(row[entity_col]).lower())
             if key in suppressions:
-                seasons.at[idx, "IsSuppressed"] = True
+                seasons.at[idx, "IsSuppressed"]   = True
                 seasons.at[idx, "SuppressReason"] = suppressions[key]
+                seasons.at[idx, "SuppressType"]   = "Entity"
+                continue
+            # Pattern suppression (OR across patterns, AND within each pattern)
+            for pattern in patterns:
+                if _evaluate_pattern(row, entity_type, pattern):
+                    seasons.at[idx, "IsSuppressed"]   = True
+                    seasons.at[idx, "SuppressReason"] = _format_pattern_reason(pattern)
+                    seasons.at[idx, "SuppressType"]   = "Pattern"
+                    break
         return seasons
 
     device_seasons = _apply_suppressions(device_seasons, "DeviceName", "Device")
@@ -1836,7 +1915,7 @@ def main():
     def _build_suppressed(dev_df, usr_df):
         cols = ["EntityType", "EntityName", "TotalRisk", "EpisodeCount", "TotalScenes",
                 "UniqueTactics", "TacticSet", "PrimaryWorkflowClass", "FirstSeen", "LastSeen",
-                "SuppressReason"]
+                "SuppressType", "SuppressReason"]
         parts = []
         for df, etype, ecol in [(dev_df, "Device", "DeviceName"),
                                 (usr_df, "User",   "AccountName")]:

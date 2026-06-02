@@ -31,6 +31,8 @@ from api.episodes import router as episodes_router
 from api.history import router as history_router
 from api.stacking import router as stacking_router
 from api.suppressions import router as suppressions_router
+from api.recommendations import router as recommendations_router
+from api.patterns import router as patterns_router
 from state import find_latest_excel, load_from_excel
 
 app = FastAPI(title="Threat Hunt Dashboard", version="1.0.0")
@@ -52,6 +54,8 @@ app.include_router(episodes_router, prefix="/api")
 app.include_router(history_router, prefix="/api")
 app.include_router(stacking_router, prefix="/api")
 app.include_router(suppressions_router, prefix="/api")
+app.include_router(recommendations_router, prefix="/api")
+app.include_router(patterns_router, prefix="/api")
 
 # Serve the built React bundle.
 # Routes are registered unconditionally — if dist/ hasn't been built yet

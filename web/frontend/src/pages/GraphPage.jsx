@@ -106,7 +106,7 @@ export default function GraphPage() {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [contextMenu, setContextMenu] = useState({ open: false, x: 0, y: 0, node: null })
   const { pipelineStatus, selectedEntity, setSelectedEntity, navigateTo } = useApp()
-  const { SuppressModal, contextMenu: cmState } = useEntityContextMenu()
+  const { suppressModal, openSuppressModal } = useEntityContextMenu()
 
   // Load graph data
   useEffect(() => {
@@ -341,12 +341,11 @@ export default function GraphPage() {
               icon: <StopOutlined />,
               label: 'Suppress entity',
               onClick: () => {
-                // Reuse the SuppressModal by injecting record into context
                 const n = contextMenu.node
-                cmState.record = {
+                openSuppressModal({
                   EntityName: n.label,
                   EntityType: n.type === 'user' ? 'User' : 'Device',
-                }
+                })
               },
             },
             {
@@ -383,7 +382,7 @@ export default function GraphPage() {
         </div>
       )}
 
-      <SuppressModal />
+      {suppressModal}
     </div>
   )
 }

@@ -66,4 +66,9 @@ export const api = {
   addSuppression:    (body)       => post('/suppressions', body),
   removeSuppression: (type, name) => del(`/suppressions/${type}/${encodeURIComponent(name)}`),
   expireSuppressions:()           => post('/suppressions/expire'),
+  recommendations:   ()           => get('/recommendations'),
+  patterns:          ()           => get('/patterns'),
+  createPattern:     (body)       => post('/patterns', body),
+  deletePattern:     (name)       => del(`/patterns/${encodeURIComponent(name)}`),
+  expirePatterns:    ()           => post('/patterns/expire'),
 }

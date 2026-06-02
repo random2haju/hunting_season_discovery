@@ -20,6 +20,43 @@ python consolidate.py --data-dir data/ --config config.json --out output/
 
 Dependencies: `pandas`, `xlsxwriter`, `drain3` (optional, for evidence clustering). Install with `pip install pandas xlsxwriter drain3`.
 
+## Running the web dashboard
+
+```bash
+# Install Python dependencies
+pip install -r web/requirements.txt
+
+# Start the backend (auto-loads latest Excel on startup, opens browser)
+python web/app.py
+# → http://localhost:8000
+
+# Frontend development (hot-reload via Vite dev server at :5173)
+cd web/frontend && npm install && npm run build   # production build (required for python web/app.py to serve)
+cd web/frontend && npm run dev                    # dev server — CORS allowed from :8000 backend
+```
+
+The backend (`web/app.py`) is a FastAPI server that:
+- Serves the built React SPA from `web/frontend/dist/`
+- Exposes REST endpoints under `/api/` for all data modules
+- Runs `consolidate.py` as a subprocess and streams progress via SSE (`GET /api/pipeline/run`)
+- Holds all hunt data in a singleton `AppState` (defined in `web/state.py`)
+
+**Frontend routes** map 1-to-1 to API modules:
+
+| Route | Page | Key API endpoint |
+|---|---|---|
+| `/` | Attack graph (Cytoscape.js) | `GET /api/graph` |
+| `/priority` | Priority Cases table | `GET /api/priority-cases` |
+| `/seasons` | Device + User Seasons | `GET /api/seasons/devices`, `/users` |
+| `/episodes` | Episode timeline | `GET /api/episodes`, `/user-episodes` |
+| `/history` | Historical trends (Plotly) | `GET /api/history` |
+| `/stacking` | Stacking Analysis | `GET /api/stacking?family=` |
+| `/suppressions` | Suppression Manager | `GET/POST/DELETE /api/suppressions` |
+
+**Adding a new API module**: create `web/api/<name>.py` with an `APIRouter`, register it in `web/app.py` under `prefix="/api"`, and add the fetch wrapper to `web/frontend/src/api.js`.
+
+**State management**: `AppContext.jsx` holds `pipelineStatus` and drawer state. All page components fetch their own data on mount — there is no global data store beyond what `AppState` holds server-side.
+
 ### Scheduling (Windows Task Scheduler)
 Set up a daily trigger pointing to `python run_hunt.py`. The script skips Saturday/Sunday and enforces the `--min-days` interval (default 3) via `output/last_run.txt`. Use `--min-days 2` if you want Mon/Wed/Fri cadence instead.
 
@@ -152,6 +189,7 @@ New tactic categories not already in `config.json` will score as 1 and log a war
 | `workflow_classification.priority_min_tactics_for_ai_dev` | AIWorkflow/DeveloperAutomation entities need at least this many distinct MITRE tactics to appear in Priority Cases (default 2) |
 | `ai_workflow_detection_discounts` | Per-DetectionType score multiplier applied only to scenes classified as `AIWorkflow`. Reduces noise from detections that are expected behaviour for AI agents (e.g. Claude calling AI provider APIs triggers "AI Data Exfiltration" but is not suspicious). Detection types not listed keep their full score (1.0). High-severity detections (credential theft, persistence, MCP tampering) should not be discounted. |
 | `suppression.store_path` | Path to the analyst suppression CSV relative to the script directory (default `output/suppressions.csv`). Managed via `suppress.py`. |
+| `suppression.pattern_store_path` | Path to the pattern suppression JSON file (default `output/pattern_suppressions.json`). Managed via the web dashboard Pattern Rules tab. |
 | `history.enabled` | Toggle historical analysis on/off (default true). When false the script behaves exactly as before this feature was added. |
 | `history.store_path` | Path to the SQLite history file relative to the script directory (default `output/hunt_history.db`). |
 | `history.minimum_runs_for_baseline` | Minimum prior runs required before IsNewHigh / IsScoreSpike / IsTacticExpansion can fire (default 3). Prevents noisy flags from thin baselines. |

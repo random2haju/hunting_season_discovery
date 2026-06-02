@@ -135,7 +135,7 @@ export default function SeasonsPage() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const { pipelineStatus, selectedEntity, setSelectedEntity } = useApp()
-  const { onRow, ContextMenuPortal, SuppressModal } = useEntityContextMenu()
+  const { onRow, contextMenuPortal, suppressModal } = useEntityContextMenu()
 
   useEffect(() => {
     setLoading(true)
@@ -173,8 +173,8 @@ export default function SeasonsPage() {
 
   return (
     <>
-      <ContextMenuPortal />
-      <SuppressModal />
+      {contextMenuPortal}
+      {suppressModal}
       <Space style={{ marginBottom: 12 }}>
         <Radio.Group
           value={view}
