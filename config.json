@@ -224,6 +224,8 @@
     "store_path": "output/suppressions.csv"
   },
 
+  "priority_history_weight": 0.5,
+
   "history": {
     "enabled":                        true,
     "store_path":                     "output/hunt_history.db",

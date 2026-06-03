@@ -920,11 +920,14 @@ def enrich_seasons_with_workflow(
     return seasons
 
 
-def build_priority_cases(device_seasons: pd.DataFrame, user_seasons: pd.DataFrame) -> pd.DataFrame:
+def build_priority_cases(device_seasons: pd.DataFrame, user_seasons: pd.DataFrame, cfg: dict = None) -> pd.DataFrame:
     """
     Combine eligible device and user season rows into a ranked Priority Investigation Cases table.
     Entities classified as AIWorkflow or DeveloperAutomation with fewer than the minimum required
     distinct MITRE tactics are excluded and routed to the AI/Dev Outliers sheet instead.
+
+    Ranking uses CompositeScore = TotalRisk + HistoricalPriority * priority_history_weight
+    so that anomalous entities surface above equally-risky stable ones.
     """
     def _prep(df, entity_type, entity_col):
         elig = df["EligibleForPriority"].fillna(True).astype(bool) if "EligibleForPriority" in df.columns \
@@ -944,15 +947,22 @@ def build_priority_cases(device_seasons: pd.DataFrame, user_seasons: pd.DataFram
     if combined.empty:
         return combined
 
+    history_weight = float((cfg or {}).get("priority_history_weight", 0.5))
+    combined["HistoricalPriority"] = combined.apply(_compute_priority, axis=1)
+    combined["CompositeScore"] = (
+        combined["TotalRisk"].fillna(0) + combined["HistoricalPriority"] * history_weight
+    ).round(2)
+
     priority_cols = [
-        "EntityType", "EntityName", "TotalRisk", "RiskPercentile",
-        "EpisodeCount", "TotalScenes", "UniqueTactics", "TacticSet",
+        "EntityType", "EntityName", "CompositeScore", "TotalRisk", "HistoricalPriority",
+        "RiskPercentile", "EpisodeCount", "TotalScenes", "UniqueTactics", "TacticSet",
         "PrimaryWorkflowClass", "AIWorkflowScenePct",
         "MaxEpisodeRisk", "FirstSeen", "LastSeen",
-        "ZScore", "IsNewHigh", "IsScoreSpike", "IsAdaptingTactics", "NewTactics",
+        "ZScore", "IsNewHigh", "IsScoreSpike", "IsTacticExpansion",
+        "IsAdaptingTactics", "IsEmergingEntity", "NewTactics",
     ]
     available = [c for c in priority_cols if c in combined.columns]
-    return combined[available].sort_values("TotalRisk", ascending=False).reset_index(drop=True)
+    return combined[available].sort_values("CompositeScore", ascending=False).reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1908,7 +1918,7 @@ def main():
     )
 
     print("[*] Building priority investigation cases...")
-    priority_cases = build_priority_cases(device_seasons, user_seasons)
+    priority_cases = build_priority_cases(device_seasons, user_seasons, cfg)
     print(f"    Priority cases: {len(priority_cases)}")
 
     # Build suppressed entities view for audit sheet

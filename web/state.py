@@ -7,6 +7,7 @@ endpoint writes to it after a successful run or reload.
 
 import glob
 import json
+import math
 import os
 import sqlite3
 from dataclasses import dataclass, field
@@ -209,14 +210,42 @@ def _stamp_suppressed(
     return df
 
 
+def _historical_priority(row: pd.Series) -> float:
+    """Mirror of consolidate._compute_priority — kept in sync manually."""
+    zscore = float(row.get("ZScore") or 0)
+    base = max(0.0, min(zscore, 10.0))
+    bonuses = (
+        (3.0 if row.get("IsScoreSpike")      else 0.0) +
+        (2.0 if row.get("IsNewHigh")          else 0.0) +
+        (2.5 if row.get("IsTacticExpansion")  else 0.0) +
+        (2.5 if row.get("IsAdaptingTactics")  else 0.0) +
+        (1.5 if row.get("IsEmergingEntity")   else 0.0) +
+        (1.0 if row.get("IsZScoreAnomaly")    else 0.0)
+    )
+    total_risk = float(row.get("TotalRisk") or 0)
+    dampener = math.log10(total_risk + 1) / math.log10(101)
+    return round((base + bonuses) * dampener, 2)
+
+
 def _rebuild_priority_cases() -> None:
-    """Rebuild the priority_cases from current device/user seasons (respects IsSuppressed)."""
+    """Rebuild the priority_cases from current device/user seasons (respects IsSuppressed).
+
+    Ranked by CompositeScore = TotalRisk + HistoricalPriority * priority_history_weight
+    so that anomalous entities surface above equally-risky stable ones.
+    """
     if state.device_seasons is None and state.user_seasons is None:
         return
 
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg = json.load(f)
+        history_weight = float(cfg.get("priority_history_weight", 0.5))
+    except Exception:
+        history_weight = 0.5
+
     priority_cols = [
-        "EntityType", "EntityName", "TotalRisk", "RiskPercentile",
-        "EpisodeCount", "TotalScenes", "UniqueTactics", "TacticSet",
+        "EntityType", "EntityName", "CompositeScore", "TotalRisk", "HistoricalPriority",
+        "RiskPercentile", "EpisodeCount", "TotalScenes", "UniqueTactics", "TacticSet",
         "PrimaryWorkflowClass", "AIWorkflowScenePct",
         "MaxEpisodeRisk", "FirstSeen", "LastSeen",
         "ZScore", "IsNewHigh", "IsScoreSpike", "IsTacticExpansion",
@@ -244,8 +273,12 @@ def _rebuild_priority_cases() -> None:
         return
 
     combined = pd.concat(parts, ignore_index=True)
+    combined["HistoricalPriority"] = combined.apply(_historical_priority, axis=1)
+    combined["CompositeScore"] = (
+        combined["TotalRisk"].fillna(0) + combined["HistoricalPriority"] * history_weight
+    ).round(2)
     available = [c for c in priority_cols if c in combined.columns]
-    state.priority_cases = combined[available].sort_values("TotalRisk", ascending=False).reset_index(drop=True)
+    state.priority_cases = combined[available].sort_values("CompositeScore", ascending=False).reset_index(drop=True)
 
 
 def _suppression_store_path() -> str:

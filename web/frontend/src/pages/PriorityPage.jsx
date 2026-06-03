@@ -61,17 +61,37 @@ const COLUMNS = [
     render: (v) => <Text code style={{ fontSize: 12 }}>{v}</Text>,
   },
   {
+    title: 'Score',
+    dataIndex: 'CompositeScore',
+    key: 'CompositeScore',
+    width: 80,
+    sorter: (a, b) => (a.CompositeScore ?? a.TotalRisk ?? 0) - (b.CompositeScore ?? b.TotalRisk ?? 0),
+    defaultSortOrder: 'descend',
+    render: (v, r) => (
+      <Tooltip title={`Risk ${r.TotalRisk?.toFixed(1) ?? '—'} + HP ${r.HistoricalPriority?.toFixed(1) ?? '0'}`}>
+        <Text strong style={{ color: RISK_COLOR(r.TotalRisk ?? 0) }}>
+          {(v ?? r.TotalRisk)?.toFixed(1) ?? '—'}
+        </Text>
+      </Tooltip>
+    ),
+  },
+  {
     title: 'Risk',
     dataIndex: 'TotalRisk',
     key: 'TotalRisk',
-    width: 90,
+    width: 75,
     sorter: (a, b) => (a.TotalRisk ?? 0) - (b.TotalRisk ?? 0),
-    defaultSortOrder: 'descend',
-    render: (v) => (
-      <Text strong style={{ color: RISK_COLOR(v ?? 0) }}>
-        {v?.toFixed(1) ?? '—'}
-      </Text>
-    ),
+    render: (v) => <Text style={{ fontSize: 11, color: RISK_COLOR(v ?? 0) }}>{v?.toFixed(1) ?? '—'}</Text>,
+  },
+  {
+    title: 'HP',
+    dataIndex: 'HistoricalPriority',
+    key: 'HistoricalPriority',
+    width: 60,
+    sorter: (a, b) => (a.HistoricalPriority ?? 0) - (b.HistoricalPriority ?? 0),
+    render: (v) => v != null && v > 0
+      ? <Text style={{ fontSize: 11, color: '#b37feb' }}>{v.toFixed(1)}</Text>
+      : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>,
   },
   {
     title: 'Pct',
