@@ -13,11 +13,9 @@ import { api } from '../api'
 import EmptyState from '../components/EmptyState'
 import { SuppressModal } from '../components/EntityDetailDrawer'
 import { useApp } from '../context/AppContext'
+import { palette, riskColor as RISK_COLOR } from '../theme'
 
 const { Text, Title } = Typography
-
-const RISK_COLOR = (v) =>
-  v >= 50 ? '#ff4d4f' : v >= 20 ? '#fa8c16' : v >= 5 ? '#faad14' : '#52c41a'
 
 // Detect and decode PowerShell -EncodedCommand / -enc base64 blobs (UTF-16LE)
 const PS_ENC_RE = /-(?:EncodedCommand|enc(?:odedCommand)?)\s+([A-Za-z0-9+/]{20,}={0,2})/i
@@ -74,15 +72,15 @@ function EvidenceCell({ value }) {
             <Space style={{ marginBottom: 4 }}>
               <Text strong style={{ fontSize: 12 }}>Raw evidence</Text>
               <Tooltip title="Copy">
-                <CopyOutlined style={{ cursor: 'pointer', color: '#888' }}
+                <CopyOutlined style={{ cursor: 'pointer', color: palette.muted }}
                   onClick={() => copyText(value)} />
               </Tooltip>
             </Space>
             <div style={{
-              background: '#141414', borderRadius: 4, padding: '8px 10px',
+              background: palette.bg, borderRadius: 4, padding: '8px 10px',
               fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all',
               whiteSpace: 'pre-wrap', maxHeight: 200, overflowY: 'auto',
-              border: '1px solid #303030',
+              border: `1px solid ${palette.border}`,
             }}>
               {value}
             </div>
@@ -93,15 +91,15 @@ function EvidenceCell({ value }) {
               <Space style={{ marginBottom: 4 }}>
                 <Text strong style={{ fontSize: 12 }}>Decoded PowerShell</Text>
                 <Tooltip title="Copy">
-                  <CopyOutlined style={{ cursor: 'pointer', color: '#888' }}
+                  <CopyOutlined style={{ cursor: 'pointer', color: palette.muted }}
                     onClick={() => copyText(decoded)} />
                 </Tooltip>
               </Space>
               <div style={{
-                background: '#0d1117', borderRadius: 4, padding: '8px 10px',
+                background: palette.bg, borderRadius: 4, padding: '8px 10px',
                 fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all',
                 whiteSpace: 'pre-wrap', maxHeight: 300, overflowY: 'auto',
-                border: '1px solid #1a3a2a', color: '#7ee787',
+                border: `1px solid ${palette.border}`, color: palette.success,
               }}>
                 {decoded}
               </div>
@@ -130,16 +128,16 @@ function ScoreCell({ record }) {
     <div style={{ fontFamily: 'monospace', fontSize: 11, lineHeight: '1.8' }}>
       {rows.filter(r => r.always || (r.val != null && r.val !== 1)).map(r => (
         <div key={r.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 16 }}>
-          <span style={{ color: '#888' }}>{r.label}</span>
-          <span style={{ color: r.val < 1 ? '#fa8c16' : r.val > 1 ? '#52c41a' : '#aaa' }}>
+          <span style={{ color: palette.muted }}>{r.label}</span>
+          <span style={{ color: r.val < 1 ? palette.secondary : r.val > 1 ? palette.success : palette.muted }}>
             {r.val?.toFixed(3) ?? '—'}
           </span>
         </div>
       ))}
-      <div style={{ borderTop: '1px solid #303030', marginTop: 4, paddingTop: 4,
+      <div style={{ borderTop: `1px solid ${palette.border}`, marginTop: 4, paddingTop: 4,
                     display: 'flex', justifyContent: 'space-between', gap: 16 }}>
-        <span style={{ color: '#888' }}>Final</span>
-        <span style={{ color: '#fff', fontWeight: 600 }}>{final.toFixed(3)}</span>
+        <span style={{ color: palette.muted }}>Final</span>
+        <span style={{ color: palette.text, fontWeight: 600 }}>{final.toFixed(3)}</span>
       </div>
     </div>
   ) : null
@@ -346,7 +344,7 @@ export default function EpisodesPage() {
                 style={{
                   cursor: 'pointer',
                   padding: '6px 8px',
-                  background: e === selected ? '#1677ff22' : 'transparent',
+                  background: e === selected ? 'rgba(25, 200, 255, 0.15)' : 'transparent',
                   borderRadius: 4,
                 }}
                 onClick={() => setSelected(e)}

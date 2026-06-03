@@ -6,11 +6,9 @@ import EmptyState from '../components/EmptyState'
 import { useEntityContextMenu } from '../components/EntityContextMenu'
 import { useEntityDetailDrawer } from '../components/EntityDetailDrawer'
 import { useApp } from '../context/AppContext'
+import { riskColor as RISK_COLOR } from '../theme'
 
 const { Text } = Typography
-
-const RISK_COLOR = (v) =>
-  v >= 50 ? '#ff4d4f' : v >= 20 ? '#fa8c16' : v >= 5 ? '#faad14' : '#52c41a'
 
 const FLAG_LABELS = {
   IsScoreSpike: 'Spike', IsNewHigh: 'NewHigh',

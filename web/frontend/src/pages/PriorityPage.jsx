@@ -6,11 +6,9 @@ import EmptyState from '../components/EmptyState'
 import { useEntityContextMenu } from '../components/EntityContextMenu'
 import { useEntityDetailDrawer } from '../components/EntityDetailDrawer'
 import { useApp } from '../context/AppContext'
+import { palette, riskColor as RISK_COLOR } from '../theme'
 
 const { Text } = Typography
-
-const RISK_COLOR = (v) =>
-  v >= 50 ? '#ff4d4f' : v >= 20 ? '#fa8c16' : v >= 5 ? '#faad14' : '#52c41a'
 
 const FLAG_COLORS = {
   IsScoreSpike:     'red',
@@ -90,7 +88,7 @@ const COLUMNS = [
     width: 60,
     sorter: (a, b) => (a.HistoricalPriority ?? 0) - (b.HistoricalPriority ?? 0),
     render: (v) => v != null && v > 0
-      ? <Text style={{ fontSize: 11, color: '#b37feb' }}>{v.toFixed(1)}</Text>
+      ? <Text style={{ fontSize: 11, color: palette.primary }}>{v.toFixed(1)}</Text>
       : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>,
   },
   {
@@ -133,7 +131,7 @@ const COLUMNS = [
     width: 60,
     sorter: (a, b) => (a.AIWorkflowScenePct ?? 0) - (b.AIWorkflowScenePct ?? 0),
     render: (v) => v != null ? (
-      <Text style={{ fontSize: 11, color: v === 0 ? '#ff4d4f' : v >= 50 ? '#52c41a' : '#fa8c16' }}>
+      <Text style={{ fontSize: 11, color: v === 0 ? palette.danger : v >= 50 ? palette.success : palette.secondary }}>
         {v}%
       </Text>
     ) : '—',

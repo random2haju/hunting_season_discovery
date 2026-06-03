@@ -8,6 +8,7 @@ import { Button, Drawer, Space, Typography } from 'antd'
 import { PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useApp } from '../context/AppContext'
 import { api } from '../api'
+import { palette } from '../theme'
 
 const { Text } = Typography
 
@@ -71,7 +72,7 @@ export default function PipelineDrawer() {
     setDrawerOpen(false)
   }
 
-  const lineColor = { log: '#d9d9d9', done: '#52c41a', error: '#ff4d4f' }
+  const lineColor = { log: palette.text, done: palette.success, error: palette.danger }
 
   return (
     <Drawer
@@ -98,7 +99,7 @@ export default function PipelineDrawer() {
     >
       <div
         style={{
-          background: '#141414',
+          background: palette.bg,
           borderRadius: 6,
           padding: 12,
           fontFamily: 'monospace',
@@ -108,7 +109,7 @@ export default function PipelineDrawer() {
         }}
       >
         {lines.length === 0 && (
-          <Text style={{ color: '#555' }}>Click Run to start the pipeline…</Text>
+          <Text style={{ color: palette.muted }}>Click Run to start the pipeline…</Text>
         )}
         {lines.map((l, i) => (
           <div key={i} style={{ color: lineColor[l.type] ?? '#d9d9d9', marginBottom: 2 }}>

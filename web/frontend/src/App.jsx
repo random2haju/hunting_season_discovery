@@ -11,6 +11,7 @@ import {
   UnorderedListOutlined,
 } from '@ant-design/icons'
 import { Badge, Button, ConfigProvider, Layout, Menu, Space, theme, Typography } from 'antd'
+import { antdComponents, antdTheme, palette } from './theme'
 import { AppProvider, useApp } from './context/AppContext'
 import PipelineDrawer from './components/PipelineDrawer'
 import InsightsPage from './pages/InsightsPage'
@@ -61,12 +62,12 @@ function Shell() {
             fontWeight: 700,
             fontSize: 14,
             letterSpacing: 0.5,
-            borderBottom: '1px solid #2a2a2a',
+            borderBottom: `1px solid ${palette.border}`,
             whiteSpace: 'nowrap',
             overflow: 'hidden',
           }}
         >
-          Threat Hunt
+          Huntflix
         </div>
         <Menu
           theme="dark"
@@ -81,8 +82,8 @@ function Shell() {
       <Layout>
         <Header
           style={{
-            background: '#141414',
-            borderBottom: '1px solid #2a2a2a',
+            background: palette.bg,
+            borderBottom: `1px solid ${palette.border}`,
             padding: '0 20px',
             display: 'flex',
             alignItems: 'center',
@@ -99,7 +100,7 @@ function Shell() {
                   : 'default'
               }
             />
-            <Text style={{ color: '#888', fontSize: 12 }}>
+            <Text style={{ color: palette.muted, fontSize: 12 }}>
               {pipelineStatus.is_running
                 ? 'Running…'
                 : pipelineStatus.loaded_file
@@ -151,7 +152,8 @@ export default function App() {
     <ConfigProvider
       theme={{
         algorithm: theme.darkAlgorithm,
-        token: { colorPrimary: '#1677ff', borderRadius: 6 },
+        token: antdTheme,
+        components: antdComponents,
       }}
     >
       <AppProvider>

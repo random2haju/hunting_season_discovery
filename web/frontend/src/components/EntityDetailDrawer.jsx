@@ -20,11 +20,9 @@ import {
 } from '@ant-design/icons'
 import { api } from '../api'
 import { useApp } from '../context/AppContext'
+import { palette, riskColor as RISK_COLOR } from '../theme'
 
 const { Text } = Typography
-
-const RISK_COLOR = (v) =>
-  v >= 50 ? '#ff4d4f' : v >= 20 ? '#fa8c16' : v >= 5 ? '#faad14' : '#52c41a'
 
 const FLAG_COLORS = {
   IsScoreSpike:      'red',
@@ -78,7 +76,7 @@ function Sparkline({ history }) {
         <polyline
           points={polyPts}
           fill="none"
-          stroke="#1677ff"
+          stroke={palette.primary}
           strokeWidth={2}
           strokeLinejoin="round"
           strokeLinecap="round"
@@ -91,7 +89,7 @@ function Sparkline({ history }) {
               key={i}
               cx={p.x} cy={p.y}
               r={isLast ? 4 : 2.5}
-              fill={isLast ? RISK_COLOR(p.s) : '#1677ff'}
+              fill={isLast ? RISK_COLOR(p.s) : palette.primary}
               opacity={isLast ? 1 : 0.65}
               style={{ cursor: 'default' }}
             >
@@ -102,7 +100,7 @@ function Sparkline({ history }) {
       </svg>
       <div style={{
         display: 'flex', justifyContent: 'space-between',
-        fontSize: 10, color: '#888', marginTop: 2,
+        fontSize: 10, color: palette.muted, marginTop: 2,
         paddingLeft: PAD, paddingRight: PAD,
       }}>
         <span>min {min.toFixed(1)}</span>
@@ -127,10 +125,10 @@ function EpisodeList({ episodes }) {
           <div
             key={i}
             style={{
-              background: '#1a1a1a',
+              background: palette.surface,
               borderRadius: 6,
               padding: '8px 10px',
-              border: '1px solid #2a2a2a',
+              border: `1px solid ${palette.border}`,
             }}
           >
             <Space wrap size={6}>
@@ -319,7 +317,7 @@ function DrawerContent({ record }) {
               <Text type="secondary" style={{ fontSize: 11, marginLeft: 8 }}>
                 avg {record.BaselineMean.toFixed(1)}
                 {record.ScoreDelta != null && (
-                  <span style={{ marginLeft: 6, color: record.ScoreDelta >= 0 ? '#52c41a' : '#ff4d4f' }}>
+                  <span style={{ marginLeft: 6, color: record.ScoreDelta >= 0 ? palette.success : palette.danger }}>
                     ({record.ScoreDelta >= 0 ? '+' : ''}{record.ScoreDelta.toFixed(1)})
                   </span>
                 )}

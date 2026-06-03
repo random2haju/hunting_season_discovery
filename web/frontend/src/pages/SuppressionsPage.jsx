@@ -8,6 +8,7 @@ import {
 } from '@ant-design/icons'
 import { api } from '../api'
 import { useApp } from '../context/AppContext'
+import { palette } from '../theme'
 
 const { Text } = Typography
 
@@ -706,7 +707,7 @@ export default function SuppressionsPage() {
             key: 'recs',
             label: (
               <Space>
-                <BulbOutlined style={{ color: '#faad14' }} />
+                <BulbOutlined style={{ color: palette.amber }} />
                 <Text strong>Suppression Recommendations</Text>
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   — stable-noise entities from run history

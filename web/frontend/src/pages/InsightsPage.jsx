@@ -6,15 +6,12 @@ import Plotly from 'plotly.js-dist-min'
 import { api } from '../api'
 import EmptyState from '../components/EmptyState'
 import { useApp } from '../context/AppContext'
+import { darkPlot, palette, riskColor } from '../theme'
 
 const Plot = createPlotlyComponent(Plotly)
 const { Text } = Typography
 
-const DARK = {
-  paper_bgcolor: 'transparent',
-  plot_bgcolor:  'transparent',
-  font: { color: '#d9d9d9', size: 11 },
-}
+const DARK = darkPlot
 
 const PLOT_CFG = { responsive: true, displayModeBar: false }
 
@@ -33,12 +30,10 @@ const FLAG_LABELS = {
   IsEmergingEntity:  'Emerging',
 }
 const WF_COLORS = {
-  Operational:          '#52c41a',
+  Operational:          palette.success,
   AIWorkflow:           '#722ed1',
-  DeveloperAutomation:  '#1677ff',
+  DeveloperAutomation:  palette.primary,
 }
-
-const RISK_COLOR = (v) => v >= 50 ? '#ff4d4f' : v >= 20 ? '#fa8c16' : '#faad14'
 
 function FlagTags({ record }) {
   const active = Object.keys(FLAG_COLORS).filter((f) => record[f])
@@ -117,13 +112,13 @@ export default function InsightsPage() {
     orientation: 'h',
     x:           tactic_distribution.map((d) => d.count),
     y:           tactic_distribution.map((d) => d.tactic),
-    marker:      { color: '#1677ff' },
+    marker:      { color: palette.primary },
     hovertemplate: '%{y}: %{x} entities<extra></extra>',
   }]
   const tacticLayout = {
     ...DARK,
     margin: { t: 8, r: 20, b: 36, l: 170 },
-    xaxis:  { gridcolor: '#2a2a2a', title: 'Entities' },
+    xaxis:  { gridcolor: palette.border, title: 'Entities' },
     yaxis:  { automargin: false },
     height: Math.max(220, tactic_distribution.length * 30 + 60),
   }
@@ -154,16 +149,16 @@ export default function InsightsPage() {
       type: 'scatter', mode: 'lines+markers',
       name: 'Total Risk',
       x: dates, y: history_trend.map((r) => r.total_risk),
-      line:   { color: '#ff4d4f', width: 2 },
+      line:   { color: palette.danger, width: 2 },
       marker: { size: 5 },
       fill:      'tozeroy',
-      fillcolor: 'rgba(255,77,79,0.07)',
+      fillcolor: 'rgba(255,77,77,0.07)',
     },
     {
       type: 'scatter', mode: 'lines+markers',
       name: 'Mean Score',
       x: dates, y: history_trend.map((r) => r.mean_score),
-      line:   { color: '#faad14', width: 2, dash: 'dot' },
+      line:   { color: palette.amber, width: 2, dash: 'dot' },
       marker: { size: 5 },
       yaxis:  'y2',
     },
@@ -180,14 +175,14 @@ export default function InsightsPage() {
     ...DARK,
     margin: { t: 16, r: 70, b: 50, l: 60 },
     height: 270,
-    xaxis:  { gridcolor: '#2a2a2a', title: 'Run date' },
+    xaxis:  { gridcolor: palette.border, title: 'Run date' },
     yaxis:  {
-      gridcolor: '#2a2a2a', title: 'Total Risk',
-      titlefont: { color: '#ff4d4f' }, tickfont: { color: '#ff4d4f' },
+      gridcolor: palette.border, title: 'Total Risk',
+      titlefont: { color: palette.danger }, tickfont: { color: palette.danger },
     },
     yaxis2: {
       title: 'Per-entity avg', overlaying: 'y', side: 'right', showgrid: false,
-      titlefont: { color: '#888' }, tickfont: { color: '#888' },
+      titlefont: { color: palette.muted }, tickfont: { color: palette.muted },
     },
     legend: { orientation: 'h', y: -0.24 },
   }
@@ -198,7 +193,7 @@ export default function InsightsPage() {
       type: 'scatter', mode: 'lines+markers',
       name: 'Entity Count',
       x: dates, y: history_trend.map((r) => r.entity_count),
-      line:   { color: '#52c41a', width: 2 },
+      line:   { color: palette.success, width: 2 },
       marker: { size: 5 },
     },
     {
@@ -214,10 +209,10 @@ export default function InsightsPage() {
     ...DARK,
     margin: { t: 16, r: 70, b: 50, l: 60 },
     height: 270,
-    xaxis:  { gridcolor: '#2a2a2a', title: 'Run date' },
+    xaxis:  { gridcolor: palette.border, title: 'Run date' },
     yaxis:  {
-      gridcolor: '#2a2a2a', title: 'Entities',
-      titlefont: { color: '#52c41a' }, tickfont: { color: '#52c41a' },
+      gridcolor: palette.border, title: 'Entities',
+      titlefont: { color: palette.success }, tickfont: { color: palette.success },
     },
     yaxis2: {
       title: 'Avg Tactics', overlaying: 'y', side: 'right', showgrid: false,
@@ -239,7 +234,7 @@ export default function InsightsPage() {
               title="Priority Cases"
               value={total_priority_cases}
               prefix={<ExclamationCircleOutlined />}
-              valueStyle={{ color: '#1677ff' }}
+              valueStyle={{ color: palette.primary }}
             />
             <Space size={4} style={{ marginTop: 4 }}>
               {high_risk_count > 0 && (
@@ -258,7 +253,7 @@ export default function InsightsPage() {
               title="Flagged Entities"
               value={flagged_entity_count}
               prefix={<AlertOutlined />}
-              valueStyle={{ color: flagged_entity_count > 0 ? '#fa8c16' : '#52c41a' }}
+              valueStyle={{ color: flagged_entity_count > 0 ? palette.secondary : palette.success }}
             />
             <Space size={2} wrap style={{ marginTop: 4 }}>
               {Object.entries(flag_counts)
@@ -278,7 +273,7 @@ export default function InsightsPage() {
               title="Active Scope"
               value={total_devices + total_users}
               prefix={<ApartmentOutlined />}
-              valueStyle={{ color: '#d9d9d9' }}
+              valueStyle={{ color: palette.text }}
             />
             <Text type="secondary" style={{ fontSize: 11 }}>
               {total_devices} devices · {total_users} users
@@ -292,7 +287,7 @@ export default function InsightsPage() {
               title="Suppressed"
               value={suppressed_count}
               prefix={<StopOutlined />}
-              valueStyle={{ color: suppressed_count > 0 ? '#888' : '#52c41a' }}
+              valueStyle={{ color: suppressed_count > 0 ? palette.muted : palette.success }}
             />
           </Card>
         </Col>

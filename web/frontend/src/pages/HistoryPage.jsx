@@ -10,16 +10,17 @@ import Plotly from 'plotly.js-dist-min'
 import { api } from '../api'
 import EmptyState from '../components/EmptyState'
 import { useApp } from '../context/AppContext'
+import { darkPlot, palette } from '../theme'
 
 const Plot = createPlotlyComponent(Plotly)
 const { Text, Title } = Typography
 
 const ANOMALY_MARKERS = {
-  IsScoreSpike:     { color: '#ff4d4f', symbol: 'star',     label: 'Spike' },
-  IsNewHigh:        { color: '#fa8c16', symbol: 'triangle-up', label: 'NewHigh' },
-  IsTacticExpansion:{ color: '#722ed1', symbol: 'diamond',  label: 'TacticExp' },
-  IsAdaptingTactics:{ color: '#eb2f96', symbol: 'cross',    label: 'Adapting' },
-  IsEmergingEntity: { color: '#13c2c2', symbol: 'circle',   label: 'Emerging' },
+  IsScoreSpike:     { color: palette.danger,    symbol: 'star',        label: 'Spike' },
+  IsNewHigh:        { color: palette.secondary, symbol: 'triangle-up', label: 'NewHigh' },
+  IsTacticExpansion:{ color: '#722ed1',         symbol: 'diamond',     label: 'TacticExp' },
+  IsAdaptingTactics:{ color: '#eb2f96',         symbol: 'cross',       label: 'Adapting' },
+  IsEmergingEntity: { color: '#13c2c2',         symbol: 'circle',      label: 'Emerging' },
 }
 
 export default function HistoryPage() {
@@ -80,8 +81,8 @@ export default function HistoryPage() {
       name: 'Risk score',
       x,
       y,
-      line: { color: '#1677ff', width: 2 },
-      marker: { color: '#1677ff', size: 5 },
+      line: { color: palette.primary, width: 2 },
+      marker: { color: palette.primary, size: 5 },
     }
 
     const flagTraces = Object.entries(ANOMALY_MARKERS).map(([flag, cfg]) => {
@@ -100,11 +101,10 @@ export default function HistoryPage() {
   }, [history])
 
   const layout = {
-    paper_bgcolor: 'transparent',
-    plot_bgcolor: 'transparent',
-    font: { color: '#d9d9d9', size: 12 },
-    xaxis: { gridcolor: '#2a2a2a', title: 'Run date' },
-    yaxis: { gridcolor: '#2a2a2a', title: 'Risk score' },
+    ...darkPlot,
+    font: { color: palette.text, size: 12 },
+    xaxis: { gridcolor: palette.border, title: 'Run date' },
+    yaxis: { gridcolor: palette.border, title: 'Risk score' },
     legend: { orientation: 'h', y: -0.2 },
     margin: { t: 20, r: 20, b: 60, l: 60 },
   }
