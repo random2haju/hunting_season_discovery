@@ -15,7 +15,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { DatePicker, Form, Input, Menu, message, Modal } from 'antd'
 import {
-  ApartmentOutlined,
   EyeOutlined,
   InfoCircleOutlined,
   StopOutlined,
@@ -77,16 +76,6 @@ export function useEntityContextMenu({ onViewDetails } = {}) {
       label: 'Suppress entity',
       onClick: () => {
         openSuppressModal(menu.record)
-        setMenu((m) => ({ ...m, open: false }))
-      },
-    },
-    {
-      key: 'graph',
-      icon: <ApartmentOutlined />,
-      label: 'View in Graph',
-      onClick: () => {
-        const { name, type } = resolveEntity(menu.record)
-        navigateTo(name, type, '/')
         setMenu((m) => ({ ...m, open: false }))
       },
     },

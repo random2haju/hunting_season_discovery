@@ -16,7 +16,7 @@ import {
   Modal, Row, Space, Spin, Statistic, Tag, Tooltip, Typography, message,
 } from 'antd'
 import {
-  ApartmentOutlined, EyeOutlined, HistoryOutlined, StopOutlined,
+  EyeOutlined, HistoryOutlined, StopOutlined,
 } from '@ant-design/icons'
 import { api } from '../api'
 import { useApp } from '../context/AppContext'
@@ -349,13 +349,6 @@ function DrawerContent({ record }) {
             onClick={() => navigateTo(name, type, '/history')}
           >
             History
-          </Button>
-          <Button
-            size="small"
-            icon={<ApartmentOutlined />}
-            onClick={() => navigateTo(name, type, '/')}
-          >
-            Graph
           </Button>
           <Button
             size="small"

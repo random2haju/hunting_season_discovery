@@ -26,10 +26,8 @@ for _p in (_WEB_DIR, _ROOT_DIR):
 from api.pipeline import router as pipeline_router
 from api.priority import router as priority_router
 from api.seasons import router as seasons_router
-from api.graph import router as graph_router
 from api.episodes import router as episodes_router
 from api.history import router as history_router
-from api.stacking import router as stacking_router
 from api.suppressions import router as suppressions_router
 from api.recommendations import router as recommendations_router
 from api.patterns import router as patterns_router
@@ -49,10 +47,8 @@ app.add_middleware(
 app.include_router(pipeline_router, prefix="/api")
 app.include_router(priority_router, prefix="/api")
 app.include_router(seasons_router, prefix="/api")
-app.include_router(graph_router, prefix="/api")
 app.include_router(episodes_router, prefix="/api")
 app.include_router(history_router, prefix="/api")
-app.include_router(stacking_router, prefix="/api")
 app.include_router(suppressions_router, prefix="/api")
 app.include_router(recommendations_router, prefix="/api")
 app.include_router(patterns_router, prefix="/api")

@@ -1,8 +1,6 @@
 import React, { useEffect } from 'react'
-import { Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import {
-  ApartmentOutlined,
-  BarChartOutlined,
   ClockCircleOutlined,
   LineChartOutlined,
   PlayCircleOutlined,
@@ -11,15 +9,13 @@ import {
   TableOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons'
-import { Badge, Button, ConfigProvider, Layout, Menu, Space, Tag, theme, Typography } from 'antd'
+import { Badge, Button, ConfigProvider, Layout, Menu, Space, theme, Typography } from 'antd'
 import { AppProvider, useApp } from './context/AppContext'
 import PipelineDrawer from './components/PipelineDrawer'
-import GraphPage from './pages/GraphPage'
 import PriorityPage from './pages/PriorityPage'
 import SeasonsPage from './pages/SeasonsPage'
 import EpisodesPage from './pages/EpisodesPage'
 import HistoryPage from './pages/HistoryPage'
-import StackingPage from './pages/StackingPage'
 import SuppressionsPage from './pages/SuppressionsPage'
 import { api } from './api'
 
@@ -27,13 +23,11 @@ const { Header, Sider, Content } = Layout
 const { Text } = Typography
 
 const NAV_ITEMS = [
-  { key: '/',             icon: <ApartmentOutlined />, label: 'Graph' },
-  { key: '/priority',     icon: <TableOutlined />,     label: 'Priority Cases' },
+  { key: '/priority',     icon: <TableOutlined />,        label: 'Priority Cases' },
   { key: '/seasons',      icon: <UnorderedListOutlined />, label: 'Seasons' },
-  { key: '/episodes',     icon: <ClockCircleOutlined />, label: 'Episode Timeline' },
-  { key: '/history',      icon: <LineChartOutlined />, label: 'Historical Trends' },
-  { key: '/stacking',     icon: <BarChartOutlined />,  label: 'Stacking Analysis' },
-  { key: '/suppressions', icon: <StopOutlined />,      label: 'Suppression Manager' },
+  { key: '/episodes',     icon: <ClockCircleOutlined />,   label: 'Episode Timeline' },
+  { key: '/history',      icon: <LineChartOutlined />,     label: 'Historical Trends' },
+  { key: '/suppressions', icon: <StopOutlined />,          label: 'Suppression Manager' },
 ]
 
 function Shell() {
@@ -52,7 +46,7 @@ function Shell() {
     }
   }
 
-  const selectedKey = NAV_ITEMS.find((i) => i.key === location.pathname)?.key ?? '/'
+  const selectedKey = NAV_ITEMS.find((i) => i.key === location.pathname)?.key ?? '/priority'
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -133,12 +127,11 @@ function Shell() {
 
         <Content style={{ padding: 24, overflow: 'auto' }}>
           <Routes>
-            <Route path="/"             element={<GraphPage />} />
+            <Route path="/"             element={<Navigate to="/priority" replace />} />
             <Route path="/priority"     element={<PriorityPage />} />
             <Route path="/seasons"      element={<SeasonsPage />} />
             <Route path="/episodes"     element={<EpisodesPage />} />
             <Route path="/history"      element={<HistoryPage />} />
-            <Route path="/stacking"     element={<StackingPage />} />
             <Route path="/suppressions" element={<SuppressionsPage />} />
           </Routes>
         </Content>

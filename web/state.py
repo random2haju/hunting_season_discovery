@@ -36,8 +36,6 @@ class AppState:
     attack_chains: Optional[pd.DataFrame] = None
     historical_anomalies: Optional[pd.DataFrame] = None
     scenes: Optional[pd.DataFrame] = None
-    stacking: Optional[pd.DataFrame] = None
-    ai_stacking: Optional[pd.DataFrame] = None
 
 
 state = AppState()
@@ -70,8 +68,6 @@ def load_from_excel(path: str) -> None:
     state.attack_chains = _read_sheet(xl, "Attack Chains")
     state.historical_anomalies = _read_sheet(xl, "Historical Anomalies")
     state.scenes = _read_sheet(xl, "All Scenes")
-    state.stacking = _read_sheet(xl, "Stacking Analysis")
-    state.ai_stacking = _read_sheet(xl, "AI Threat Summary")
     state.loaded_file = os.path.basename(path)
     state.is_loaded = True
     xl.close()
