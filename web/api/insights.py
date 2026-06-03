@@ -117,16 +117,23 @@ def get_insights():
     if os.path.exists(db):
         try:
             con = sqlite3.connect(db)
+            existing_cols = {r[1] for r in con.execute("PRAGMA table_info(hunt_history)").fetchall()}
+            has_hp = "HistoricalPriority" in existing_cols
+            hp_fields = (
+                "ROUND(AVG(HistoricalPriority), 2)   AS mean_hp,"
+                " ROUND(SUM(HistoricalPriority), 2)  AS total_hp"
+                if has_hp else
+                "0.0 AS mean_hp, 0.0 AS total_hp"
+            )
             df_h = pd.read_sql(
-                """
+                f"""
                 SELECT RunTimestamp,
-                       MIN(RunTimestampEpoch)              AS epoch,
-                       COUNT(DISTINCT EntityName)          AS entity_count,
-                       ROUND(SUM(SeasonScore), 2)          AS total_risk,
-                       ROUND(AVG(SeasonScore), 2)          AS mean_score,
-                       ROUND(AVG(UniqueTactics), 2)        AS mean_tactics,
-                       ROUND(AVG(HistoricalPriority), 2)   AS mean_hp,
-                       ROUND(SUM(HistoricalPriority), 2)   AS total_hp
+                       MIN(RunTimestampEpoch)          AS epoch,
+                       COUNT(DISTINCT EntityName)      AS entity_count,
+                       ROUND(SUM(SeasonScore), 2)      AS total_risk,
+                       ROUND(AVG(SeasonScore), 2)      AS mean_score,
+                       ROUND(AVG(UniqueTactics), 2)    AS mean_tactics,
+                       {hp_fields}
                 FROM hunt_history
                 GROUP BY RunTimestamp
                 ORDER BY epoch ASC
