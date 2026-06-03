@@ -120,11 +120,13 @@ def get_insights():
             df_h = pd.read_sql(
                 """
                 SELECT RunTimestamp,
-                       MIN(RunTimestampEpoch)        AS epoch,
-                       COUNT(DISTINCT EntityName)    AS entity_count,
-                       ROUND(SUM(SeasonScore), 2)    AS total_risk,
-                       ROUND(AVG(SeasonScore), 2)    AS mean_score,
-                       ROUND(AVG(UniqueTactics), 2)  AS mean_tactics
+                       MIN(RunTimestampEpoch)              AS epoch,
+                       COUNT(DISTINCT EntityName)          AS entity_count,
+                       ROUND(SUM(SeasonScore), 2)          AS total_risk,
+                       ROUND(AVG(SeasonScore), 2)          AS mean_score,
+                       ROUND(AVG(UniqueTactics), 2)        AS mean_tactics,
+                       ROUND(AVG(HistoricalPriority), 2)   AS mean_hp,
+                       ROUND(SUM(HistoricalPriority), 2)   AS total_hp
                 FROM hunt_history
                 GROUP BY RunTimestamp
                 ORDER BY epoch ASC
@@ -134,7 +136,7 @@ def get_insights():
             con.close()
             df_h["run_date"] = df_h["RunTimestamp"].str[:10]
             history_trend = df_h[
-                ["run_date", "entity_count", "total_risk", "mean_score", "mean_tactics"]
+                ["run_date", "entity_count", "total_risk", "mean_score", "mean_tactics", "mean_hp", "total_hp"]
             ].to_dict(orient="records")
         except Exception:
             history_trend = []

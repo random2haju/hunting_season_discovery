@@ -167,6 +167,14 @@ export default function InsightsPage() {
       marker: { size: 5 },
       yaxis:  'y2',
     },
+    {
+      type: 'scatter', mode: 'lines+markers',
+      name: 'Mean HP',
+      x: dates, y: history_trend.map((r) => r.mean_hp),
+      line:   { color: '#b37feb', width: 2, dash: 'dashdot' },
+      marker: { size: 5, symbol: 'diamond' },
+      yaxis:  'y2',
+    },
   ]
   const riskLayout = {
     ...DARK,
@@ -178,8 +186,8 @@ export default function InsightsPage() {
       titlefont: { color: '#ff4d4f' }, tickfont: { color: '#ff4d4f' },
     },
     yaxis2: {
-      title: 'Mean Score', overlaying: 'y', side: 'right', showgrid: false,
-      titlefont: { color: '#faad14' }, tickfont: { color: '#faad14' },
+      title: 'Per-entity avg', overlaying: 'y', side: 'right', showgrid: false,
+      titlefont: { color: '#888' }, tickfont: { color: '#888' },
     },
     legend: { orientation: 'h', y: -0.24 },
   }

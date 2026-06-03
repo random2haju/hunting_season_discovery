@@ -1097,7 +1097,7 @@ def build_attack_chains(device_seasons: pd.DataFrame, scenes: pd.DataFrame, cfg:
 
 _HISTORY_COLS = [
     "RunId", "RunTimestamp", "RunTimestampEpoch", "OutputVersion",
-    "EntityType", "EntityName", "SeasonScore", "EpisodeCount",
+    "EntityType", "EntityName", "SeasonScore", "HistoricalPriority", "EpisodeCount",
     "SceneCount", "UniqueTactics", "BehaviorFamilyCount", "TopBehaviorFamily",
     "HasMDEAlert", "CrossDeviceLink", "TopEpisodeScore", "TopTactic",
     "TacticSet",
@@ -1315,6 +1315,7 @@ def _build_history_row(
         "EntityType":          entity_type,
         "EntityName":          entity_name,
         "SeasonScore":         float(row["TotalRisk"]),
+        "HistoricalPriority":  float(_compute_priority(row)),
         "EpisodeCount":        int(row["EpisodeCount"]),
         "SceneCount":          int(row["TotalScenes"]),
         "UniqueTactics":       int(row["UniqueTactics"]),
@@ -1376,6 +1377,7 @@ def append_to_history(
                 EntityType          TEXT    NOT NULL,
                 EntityName          TEXT    NOT NULL,
                 SeasonScore         REAL    NOT NULL,
+                HistoricalPriority  REAL    NOT NULL DEFAULT 0,
                 EpisodeCount        INTEGER NOT NULL,
                 SceneCount          INTEGER NOT NULL,
                 UniqueTactics       INTEGER NOT NULL,
@@ -1393,6 +1395,9 @@ def append_to_history(
         if "TacticSet" not in existing_cols:
             con.execute("ALTER TABLE hunt_history ADD COLUMN TacticSet TEXT NOT NULL DEFAULT ''")
             print("  [HISTORY] Schema migrated: added TacticSet column")
+        if "HistoricalPriority" not in existing_cols:
+            con.execute("ALTER TABLE hunt_history ADD COLUMN HistoricalPriority REAL NOT NULL DEFAULT 0")
+            print("  [HISTORY] Schema migrated: added HistoricalPriority column")
         con.execute("""
             CREATE INDEX IF NOT EXISTS idx_entity
             ON hunt_history (EntityType, EntityName, RunTimestampEpoch DESC)
