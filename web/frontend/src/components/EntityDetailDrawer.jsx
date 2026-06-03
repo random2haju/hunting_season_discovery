@@ -62,30 +62,54 @@ function Sparkline({ history }) {
   const range = max - min || 1
   const W = 340, H = 54, PAD = 6
 
-  const pts = scores
-    .map((s, i) => {
-      const x = PAD + (i / Math.max(scores.length - 1, 1)) * (W - PAD * 2)
-      const y = H - PAD - ((s - min) / range) * (H - PAD * 2)
-      return `${x},${y}`
-    })
-    .join(' ')
+  const pts = scores.map((s, i) => ({
+    x: PAD + (i / Math.max(scores.length - 1, 1)) * (W - PAD * 2),
+    y: H - PAD - ((s - min) / range) * (H - PAD * 2),
+    s,
+    date: history[i].RunDate ?? history[i].run_date ?? null,
+  }))
 
-  const lastScore = scores[scores.length - 1]
-  const lx = W - PAD
-  const ly = H - PAD - ((lastScore - min) / range) * (H - PAD * 2)
+  const polyPts = pts.map((p) => `${p.x},${p.y}`).join(' ')
+  const last = pts[pts.length - 1]
 
   return (
-    <svg width={W} height={H} style={{ display: 'block' }}>
-      <polyline
-        points={pts}
-        fill="none"
-        stroke="#1677ff"
-        strokeWidth={2}
-        strokeLinejoin="round"
-        strokeLinecap="round"
-      />
-      <circle cx={lx} cy={ly} r={4} fill={RISK_COLOR(lastScore)} />
-    </svg>
+    <div>
+      <svg width={W} height={H} style={{ display: 'block' }}>
+        <polyline
+          points={polyPts}
+          fill="none"
+          stroke="#1677ff"
+          strokeWidth={2}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+        {pts.map((p, i) => {
+          const isLast = i === pts.length - 1
+          const label = p.date ? `${p.date}: ${p.s.toFixed(1)}` : p.s.toFixed(1)
+          return (
+            <circle
+              key={i}
+              cx={p.x} cy={p.y}
+              r={isLast ? 4 : 2.5}
+              fill={isLast ? RISK_COLOR(p.s) : '#1677ff'}
+              opacity={isLast ? 1 : 0.65}
+              style={{ cursor: 'default' }}
+            >
+              <title>{label}</title>
+            </circle>
+          )
+        })}
+      </svg>
+      <div style={{
+        display: 'flex', justifyContent: 'space-between',
+        fontSize: 10, color: '#888', marginTop: 2,
+        paddingLeft: PAD, paddingRight: PAD,
+      }}>
+        <span>min {min.toFixed(1)}</span>
+        <span>max {max.toFixed(1)}</span>
+        <span style={{ color: RISK_COLOR(last.s) }}>now {last.s.toFixed(1)}</span>
+      </div>
+    </div>
   )
 }
 
@@ -137,9 +161,9 @@ function EpisodeList({ episodes }) {
   )
 }
 
-// ── Suppress modal (inline so the drawer is self-contained) ──────────────────
+// ── Suppress modal (exported so other pages can reuse it) ────────────────────
 
-function SuppressModal({ open, name, type, onClose }) {
+export function SuppressModal({ open, name, type, onClose }) {
   const [form] = Form.useForm()
 
   async function handleFinish(values) {
@@ -310,9 +334,14 @@ function DrawerContent({ record }) {
           <Button
             size="small"
             icon={<EyeOutlined />}
-            onClick={() => navigateTo(name, type, '/episodes')}
+            onClick={() =>
+              window.open(
+                `/episodes?entity=${encodeURIComponent(name)}&type=${type}`,
+                '_blank',
+              )
+            }
           >
-            Episodes
+            Episodes ↗
           </Button>
           <Button
             size="small"

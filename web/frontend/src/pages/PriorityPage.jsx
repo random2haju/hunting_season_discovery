@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
-import { Input, Space, Table, Tag, Tooltip, Typography } from 'antd'
+import { Input, Select, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import { SearchOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import EmptyState from '../components/EmptyState'
@@ -139,6 +139,7 @@ export default function PriorityPage() {
   const [data, setData] = useState([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const [tacticFilter, setTacticFilter] = useState([])
   const { pipelineStatus } = useApp()
   const { openDetail, entityDetailDrawer } = useEntityDetailDrawer()
   const { onRow, contextMenuPortal, suppressModal } = useEntityContextMenu({ onViewDetails: openDetail })
@@ -160,15 +161,30 @@ export default function PriorityPage() {
     })
   }, [pipelineStatus.loaded_file])
 
+  const allTactics = useMemo(() => {
+    const set = new Set()
+    data.forEach((r) => {
+      if (r.TacticSet) r.TacticSet.split(',').forEach((t) => { const s = t.trim(); if (s) set.add(s) })
+    })
+    return [...set].sort()
+  }, [data])
+
   const filtered = useMemo(() => {
-    if (!search) return data
-    const q = search.toLowerCase()
-    return data.filter(
-      (r) =>
-        r.EntityName?.toLowerCase().includes(q) ||
-        r.TacticSet?.toLowerCase().includes(q),
-    )
-  }, [data, search])
+    let result = data
+    if (search) {
+      const q = search.toLowerCase()
+      result = result.filter(
+        (r) => r.EntityName?.toLowerCase().includes(q) || r.TacticSet?.toLowerCase().includes(q),
+      )
+    }
+    if (tacticFilter.length > 0) {
+      result = result.filter((r) => {
+        const tactics = (r.TacticSet ?? '').split(',').map((t) => t.trim())
+        return tacticFilter.every((t) => tactics.includes(t))
+      })
+    }
+    return result
+  }, [data, search, tacticFilter])
 
   if (!loading && !pipelineStatus.is_loaded) return <EmptyState />
 
@@ -177,18 +193,28 @@ export default function PriorityPage() {
       {contextMenuPortal}
       {suppressModal}
       {entityDetailDrawer}
-      <Space style={{ marginBottom: 12 }}>
+      <Space style={{ marginBottom: 12 }} wrap>
         <Input
           prefix={<SearchOutlined />}
           placeholder="Search entity or tactic…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           allowClear
-          style={{ width: 280 }}
+          style={{ width: 240 }}
+        />
+        <Select
+          mode="multiple"
+          allowClear
+          placeholder="Filter by tactic…"
+          value={tacticFilter}
+          onChange={setTacticFilter}
+          options={allTactics.map((t) => ({ label: t, value: t }))}
+          style={{ minWidth: 220 }}
+          maxTagCount={2}
         />
         <Text type="secondary" style={{ fontSize: 12 }}>
           {filtered.length} case{filtered.length !== 1 ? 's' : ''}
-          {search ? ` (filtered from ${data.length})` : ''}
+          {(search || tacticFilter.length > 0) ? ` (filtered from ${data.length})` : ''}
         </Text>
       </Space>
       <Table

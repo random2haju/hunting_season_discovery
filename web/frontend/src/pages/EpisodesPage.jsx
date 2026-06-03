@@ -5,11 +5,13 @@
 
 import React, { useEffect, useRef, useState } from 'react'
 import {
-  Col, Collapse, Empty, Input, List, Modal, Row, Segmented, Space, Spin, Table, Tag, Tooltip, Typography,
+  Button, Col, Collapse, Empty, Input, List, Modal, Row, Segmented, Space, Spin, Table, Tag, Tooltip, Typography,
 } from 'antd'
-import { CopyOutlined, SearchOutlined } from '@ant-design/icons'
+import { CopyOutlined, HistoryOutlined, SearchOutlined, StopOutlined } from '@ant-design/icons'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import EmptyState from '../components/EmptyState'
+import { SuppressModal } from '../components/EntityDetailDrawer'
 import { useApp } from '../context/AppContext'
 
 const { Text, Title } = Typography
@@ -227,16 +229,23 @@ function EpisodeCard({ ep, scenes }) {
 }
 
 export default function EpisodesPage() {
-  const [mode, setMode] = useState('Device')
+  const [searchParams] = useSearchParams()
+  const urlEntity = searchParams.get('entity')
+  const urlType   = searchParams.get('type')
+  const urlMode   = urlType === 'User' ? 'User' : 'Device'
+
+  const [mode, setMode] = useState(() => urlEntity ? urlMode : 'Device')
   const [allEntities, setAllEntities] = useState([])
   const [entitySearch, setEntitySearch] = useState('')
   const [selected, setSelected] = useState(null)
   const [detail, setDetail] = useState(null)
   const [loadingList, setLoadingList] = useState(true)
   const [loadingDetail, setLoadingDetail] = useState(false)
-  const { pipelineStatus, selectedEntity, setSelectedEntity } = useApp()
-  // Holds a pending navigation target across the mode-change → list-reload cycle
-  const pendingNav = useRef(null)
+  const [suppressOpen, setSuppressOpen] = useState(false)
+  const { pipelineStatus, selectedEntity, setSelectedEntity, navigateTo } = useApp()
+  // Holds a pending navigation target across the mode-change → list-reload cycle.
+  // Pre-seeded from URL params so new-tab opens land on the right entity.
+  const pendingNav = useRef(urlEntity ? { name: urlEntity, mode: urlMode } : null)
 
   // Load entity list when mode or data changes.
   // pendingNav.current carries { name, mode } for cross-module jumps. We only
@@ -346,9 +355,32 @@ export default function EpisodesPage() {
           <Empty description={`No episodes found for ${selected}`} />
         ) : (
           <>
-            <Title level={5} style={{ marginBottom: 12 }}>
-              {selected} — {detail.episodes.length} episode{detail.episodes.length !== 1 ? 's' : ''}
-            </Title>
+            <SuppressModal
+              open={suppressOpen}
+              name={selected ?? ''}
+              type={mode}
+              onClose={() => setSuppressOpen(false)}
+            />
+            <Space wrap style={{ marginBottom: 12 }} align="center">
+              <Title level={5} style={{ marginBottom: 0 }}>
+                {selected} — {detail.episodes.length} episode{detail.episodes.length !== 1 ? 's' : ''}
+              </Title>
+              <Button
+                size="small"
+                icon={<HistoryOutlined />}
+                onClick={() => navigateTo(selected, mode, '/history')}
+              >
+                History
+              </Button>
+              <Button
+                size="small"
+                danger
+                icon={<StopOutlined />}
+                onClick={() => setSuppressOpen(true)}
+              >
+                Suppress
+              </Button>
+            </Space>
             {detail.episodes.map((ep, i) => (
               <EpisodeCard key={i} ep={ep} scenes={detail.scenes ?? []} />
             ))}

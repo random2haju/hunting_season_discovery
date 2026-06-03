@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
-import { Input, Radio, Space, Table, Tag, Tooltip, Typography } from 'antd'
+import { Input, Radio, Select, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import { SearchOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import EmptyState from '../components/EmptyState'
@@ -135,6 +135,7 @@ export default function SeasonsPage() {
   const [userData, setUserData] = useState([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const [tacticFilter, setTacticFilter] = useState([])
   const { pipelineStatus, selectedEntity, setSelectedEntity } = useApp()
   const { openDetail, entityDetailDrawer } = useEntityDetailDrawer()
   const { onRow, contextMenuPortal, suppressModal } = useEntityContextMenu({ onViewDetails: openDetail })
@@ -170,15 +171,30 @@ export default function SeasonsPage() {
   const entityCol = view === 'devices' ? 'DeviceName' : 'AccountName'
   const columns = makeColumns(entityCol)
 
+  const allTactics = useMemo(() => {
+    const set = new Set()
+    rows.forEach((r) => {
+      if (r.TacticSet) r.TacticSet.split(',').forEach((t) => { const s = t.trim(); if (s) set.add(s) })
+    })
+    return [...set].sort()
+  }, [rows])
+
   const filtered = useMemo(() => {
-    if (!search) return rows
-    const q = search.toLowerCase()
-    return rows.filter(
-      (r) =>
-        r[entityCol]?.toLowerCase().includes(q) ||
-        r.TacticSet?.toLowerCase().includes(q),
-    )
-  }, [rows, search, entityCol])
+    let result = rows
+    if (search) {
+      const q = search.toLowerCase()
+      result = result.filter(
+        (r) => r[entityCol]?.toLowerCase().includes(q) || r.TacticSet?.toLowerCase().includes(q),
+      )
+    }
+    if (tacticFilter.length > 0) {
+      result = result.filter((r) => {
+        const tactics = (r.TacticSet ?? '').split(',').map((t) => t.trim())
+        return tacticFilter.every((t) => tactics.includes(t))
+      })
+    }
+    return result
+  }, [rows, search, entityCol, tacticFilter])
 
   if (!loading && !pipelineStatus.is_loaded) return <EmptyState />
 
@@ -187,10 +203,10 @@ export default function SeasonsPage() {
       {contextMenuPortal}
       {suppressModal}
       {entityDetailDrawer}
-      <Space style={{ marginBottom: 12 }}>
+      <Space style={{ marginBottom: 12 }} wrap>
         <Radio.Group
           value={view}
-          onChange={(e) => { setView(e.target.value); setSearch('') }}
+          onChange={(e) => { setView(e.target.value); setSearch(''); setTacticFilter([]) }}
           optionType="button"
           buttonStyle="solid"
           options={[
@@ -204,7 +220,17 @@ export default function SeasonsPage() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           allowClear
-          style={{ width: 280 }}
+          style={{ width: 240 }}
+        />
+        <Select
+          mode="multiple"
+          allowClear
+          placeholder="Filter by tactic…"
+          value={tacticFilter}
+          onChange={setTacticFilter}
+          options={allTactics.map((t) => ({ label: t, value: t }))}
+          style={{ minWidth: 220 }}
+          maxTagCount={2}
         />
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
           {filtered.length} of {rows.length}
