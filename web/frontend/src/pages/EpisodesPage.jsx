@@ -246,6 +246,9 @@ export default function EpisodesPage() {
   // Holds a pending navigation target across the mode-change → list-reload cycle.
   // Pre-seeded from URL params so new-tab opens land on the right entity.
   const pendingNav = useRef(urlEntity ? { name: urlEntity, mode: urlMode } : null)
+  // Remembers the entity that was successfully selected via URL params or cross-module nav
+  // so that subsequent pipelineStatus-triggered list reloads don't clear the selection.
+  const confirmedNav = useRef(null)
 
   // Load entity list when mode or data changes.
   // pendingNav.current carries { name, mode } for cross-module jumps. We only
@@ -264,10 +267,18 @@ export default function EpisodesPage() {
       const nav = pendingNav.current
       if (nav && nav.mode === fetchMode) {
         pendingNav.current = null
+        confirmedNav.current = { name: nav.name, mode: fetchMode }
         setSelected(nav.name)
       } else if (!nav) {
-        setSelected(null)
-        setDetail(null)
+        // If a previously confirmed entity is still valid in the new list, keep it
+        const confirmed = confirmedNav.current
+        if (confirmed && confirmed.mode === fetchMode && entities.includes(confirmed.name)) {
+          // selection is still valid — don't clear
+        } else {
+          confirmedNav.current = null
+          setSelected(null)
+          setDetail(null)
+        }
       }
       // nav exists but targets a different mode — leave it for that mode's fetch
     })
@@ -275,9 +286,11 @@ export default function EpisodesPage() {
 
   // Cross-module navigation — stash { name, mode } before changing mode so the
   // correct fetch above can pick it up once its entity list is ready.
+  // Also clear confirmedNav so the new target takes over as the stable selection.
   useEffect(() => {
     if (!selectedEntity) return
     const targetMode = selectedEntity.type === 'User' ? 'User' : 'Device'
+    confirmedNav.current = null
     pendingNav.current = { name: selectedEntity.name, mode: targetMode }
     setMode(targetMode)
     setSelectedEntity(null)
