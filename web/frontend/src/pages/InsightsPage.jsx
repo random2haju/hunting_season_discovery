@@ -59,7 +59,7 @@ const FLAGGED_COLS = [
     sorter: (a, b) => (a.CompositeScore ?? 0) - (b.CompositeScore ?? 0),
     defaultSortOrder: 'descend',
     render: (v, r) => (
-      <Text strong style={{ color: RISK_COLOR(r.TotalRisk ?? 0) }}>
+      <Text strong style={{ color: riskColor(r.TotalRisk ?? 0) }}>
         {(v ?? r.TotalRisk)?.toFixed(1) ?? '—'}
       </Text>
     ),
