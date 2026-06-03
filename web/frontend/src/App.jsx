@@ -13,6 +13,7 @@ import {
 import { Badge, Button, ConfigProvider, Layout, Menu, Space, theme, Typography } from 'antd'
 import { antdComponents, antdTheme, palette } from './theme'
 import { AppProvider, useApp } from './context/AppContext'
+import logo from './assets/logo.png'
 import PipelineDrawer from './components/PipelineDrawer'
 import InsightsPage from './pages/InsightsPage'
 import PriorityPage from './pages/PriorityPage'
@@ -57,17 +58,19 @@ function Shell() {
       <Sider width={220} theme="dark" collapsible>
         <div
           style={{
-            padding: '16px 20px 12px',
-            color: '#fff',
-            fontWeight: 700,
-            fontSize: 14,
-            letterSpacing: 0.5,
+            padding: '12px 16px',
             borderBottom: `1px solid ${palette.border}`,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
             whiteSpace: 'nowrap',
             overflow: 'hidden',
           }}
         >
-          Huntflix
+          <img src={logo} alt="Huntflix" style={{ width: 32, height: 32, borderRadius: 8, flexShrink: 0 }} />
+          <span style={{ color: palette.text, fontWeight: 700, fontSize: 15, letterSpacing: 0.5 }}>
+            Huntflix
+          </span>
         </div>
         <Menu
           theme="dark"
