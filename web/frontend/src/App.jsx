@@ -2,6 +2,7 @@ import React, { useEffect } from 'react'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import {
   ClockCircleOutlined,
+  DashboardOutlined,
   LineChartOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
@@ -12,6 +13,7 @@ import {
 import { Badge, Button, ConfigProvider, Layout, Menu, Space, theme, Typography } from 'antd'
 import { AppProvider, useApp } from './context/AppContext'
 import PipelineDrawer from './components/PipelineDrawer'
+import InsightsPage from './pages/InsightsPage'
 import PriorityPage from './pages/PriorityPage'
 import SeasonsPage from './pages/SeasonsPage'
 import EpisodesPage from './pages/EpisodesPage'
@@ -23,7 +25,8 @@ const { Header, Sider, Content } = Layout
 const { Text } = Typography
 
 const NAV_ITEMS = [
-  { key: '/priority',     icon: <TableOutlined />,        label: 'Priority Cases' },
+  { key: '/insights',     icon: <DashboardOutlined />,     label: 'Insights' },
+  { key: '/priority',     icon: <TableOutlined />,         label: 'Priority Cases' },
   { key: '/seasons',      icon: <UnorderedListOutlined />, label: 'Seasons' },
   { key: '/episodes',     icon: <ClockCircleOutlined />,   label: 'Episode Timeline' },
   { key: '/history',      icon: <LineChartOutlined />,     label: 'Historical Trends' },
@@ -46,7 +49,7 @@ function Shell() {
     }
   }
 
-  const selectedKey = NAV_ITEMS.find((i) => i.key === location.pathname)?.key ?? '/priority'
+  const selectedKey = NAV_ITEMS.find((i) => i.key === location.pathname)?.key ?? '/insights'
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -127,7 +130,8 @@ function Shell() {
 
         <Content style={{ padding: 24, overflow: 'auto' }}>
           <Routes>
-            <Route path="/"             element={<Navigate to="/priority" replace />} />
+            <Route path="/"             element={<Navigate to="/insights" replace />} />
+            <Route path="/insights"     element={<InsightsPage />} />
             <Route path="/priority"     element={<PriorityPage />} />
             <Route path="/seasons"      element={<SeasonsPage />} />
             <Route path="/episodes"     element={<EpisodesPage />} />
