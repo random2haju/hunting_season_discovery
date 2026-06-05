@@ -23,6 +23,7 @@ for _p in (_WEB_DIR, _ROOT_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from api.coverage import router as coverage_router
 from api.insights import router as insights_router
 from api.pipeline import router as pipeline_router
 from api.priority import router as priority_router
@@ -45,6 +46,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(coverage_router, prefix="/api")
 app.include_router(insights_router, prefix="/api")
 app.include_router(pipeline_router, prefix="/api")
 app.include_router(priority_router, prefix="/api")

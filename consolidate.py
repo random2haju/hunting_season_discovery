@@ -1409,6 +1409,40 @@ def append_to_history(
                         method="multi", chunksize=500)
         con.commit()
         print(f"  [HISTORY] Appended {len(records)} record(s) (RunId: {run_id[:8]}...)")
+
+        # ── detection_history: one row per DetectionType per run ──────────────
+        if scenes is not None and not scenes.empty and "DetectionType" in scenes.columns:
+            dh_rows = []
+            for dt, grp in scenes.groupby("DetectionType"):
+                dh_rows.append({
+                    "RunId":             run_id,
+                    "RunTimestamp":      run_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "RunTimestampEpoch": run_ts.timestamp(),
+                    "DetectionType":     dt,
+                    "SceneCount":        len(grp),
+                    "DeviceCount":       int(grp["DeviceName"].nunique()) if "DeviceName" in grp.columns else 0,
+                })
+            if dh_rows:
+                con.execute("""
+                    CREATE TABLE IF NOT EXISTS detection_history (
+                        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                        RunId             TEXT NOT NULL,
+                        RunTimestamp      TEXT NOT NULL,
+                        RunTimestampEpoch REAL NOT NULL,
+                        DetectionType     TEXT NOT NULL,
+                        SceneCount        INTEGER NOT NULL DEFAULT 0,
+                        DeviceCount       INTEGER NOT NULL DEFAULT 0
+                    )
+                """)
+                con.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_dh_detection
+                    ON detection_history (DetectionType, RunTimestampEpoch DESC)
+                """)
+                pd.DataFrame(dh_rows).to_sql(
+                    "detection_history", con, if_exists="append", index=False, method="multi"
+                )
+                con.commit()
+                print(f"  [HISTORY] Detection coverage: {len(dh_rows)} type(s) recorded")
     except Exception as exc:
         print(f"  [WARN] Failed to write history to {store_path}: {exc}")
         try:

@@ -5,6 +5,7 @@ import {
   DashboardOutlined,
   LineChartOutlined,
   PlayCircleOutlined,
+  RadarChartOutlined,
   ReloadOutlined,
   StopOutlined,
   TableOutlined,
@@ -15,6 +16,7 @@ import { antdComponents, antdTheme, palette } from './theme'
 import { AppProvider, useApp } from './context/AppContext'
 import logo from './assets/logo.png'
 import PipelineDrawer from './components/PipelineDrawer'
+import CoveragePage from './pages/CoveragePage'
 import InsightsPage from './pages/InsightsPage'
 import PriorityPage from './pages/PriorityPage'
 import SeasonsPage from './pages/SeasonsPage'
@@ -28,6 +30,7 @@ const { Text } = Typography
 
 const NAV_ITEMS = [
   { key: '/insights',     icon: <DashboardOutlined />,     label: 'Insights' },
+  { key: '/coverage',     icon: <RadarChartOutlined />,    label: 'Detection Coverage' },
   { key: '/priority',     icon: <TableOutlined />,         label: 'Priority Cases' },
   { key: '/seasons',      icon: <UnorderedListOutlined />, label: 'Seasons' },
   { key: '/episodes',     icon: <ClockCircleOutlined />,   label: 'Episode Timeline' },
@@ -136,6 +139,7 @@ function Shell() {
           <Routes>
             <Route path="/"             element={<Navigate to="/insights" replace />} />
             <Route path="/insights"     element={<InsightsPage />} />
+            <Route path="/coverage"     element={<CoveragePage />} />
             <Route path="/priority"     element={<PriorityPage />} />
             <Route path="/seasons"      element={<SeasonsPage />} />
             <Route path="/episodes"     element={<EpisodesPage />} />

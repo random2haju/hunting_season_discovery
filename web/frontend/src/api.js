@@ -50,6 +50,7 @@ async function del(path) {
 
 export const api = {
   status:            ()           => get('/status'),
+  coverage:          ()           => get('/coverage'),
   insights:          ()           => get('/insights'),
   reload:            ()           => post('/pipeline/reload'),
   priorityCases:     ()           => get('/priority-cases'),
