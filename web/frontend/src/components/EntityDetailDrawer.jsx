@@ -10,13 +10,13 @@
  *   {entityDetailDrawer}
  */
 
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Button, Col, DatePicker, Drawer, Form, Input,
   Modal, Row, Space, Spin, Statistic, Tag, Tooltip, Typography, message,
 } from 'antd'
 import {
-  EyeOutlined, HistoryOutlined, StopOutlined,
+  EyeOutlined, HistoryOutlined, LaptopOutlined, StopOutlined, UserOutlined,
 } from '@ant-design/icons'
 import { api } from '../api'
 import { useApp } from '../context/AppContext'
@@ -213,6 +213,7 @@ function DrawerContent({ record }) {
   const { navigateTo } = useApp()
   const { name, type } = resolveEntity(record)
   const [episodes, setEpisodes] = useState([])
+  const [scenes, setScenes] = useState([])
   const [history, setHistory] = useState([])
   const [loading, setLoading] = useState(true)
   const [suppressOpen, setSuppressOpen] = useState(false)
@@ -225,10 +226,23 @@ function DrawerContent({ record }) {
       api.entityHistory(type, name),
     ]).then(([epRes, histRes]) => {
       setEpisodes(epRes.data?.episodes ?? [])
+      setScenes(epRes.data?.scenes ?? [])
       setHistory(histRes.data?.data ?? [])
       setLoading(false)
     })
   }, [name, type])
+
+  const involvedUsers = useMemo(() => {
+    if (type !== 'Device') return []
+    const names = new Set(scenes.map((s) => s.AccountName).filter(Boolean))
+    return [...names].sort()
+  }, [scenes, type])
+
+  const involvedDevices = useMemo(() => {
+    if (type !== 'User') return []
+    const names = new Set(scenes.map((s) => s.DeviceName).filter(Boolean))
+    return [...names].sort()
+  }, [scenes, type])
 
   const flags = Object.keys(FLAG_COLORS).filter((f) => record?.[f])
   const risk = record?.TotalRisk
@@ -303,10 +317,70 @@ function DrawerContent({ record }) {
           )}
         </Space>
 
+        {/* Tactic set */}
         {record?.TacticSet && (
-          <Text type="secondary" style={{ fontSize: 11 }}>
-            {record.TacticSet}
-          </Text>
+          <div>
+            <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, display: 'block', marginBottom: 2 }}>Tactics</Text>
+            <Text type="secondary" style={{ fontSize: 11 }}>{record.TacticSet}</Text>
+          </div>
+        )}
+
+        {/* Behavior families */}
+        {record?.BehaviorFamilies && (
+          <div>
+            <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, display: 'block', marginBottom: 4 }}>Behavior Families</Text>
+            <Space size={4} wrap>
+              {record.BehaviorFamilies.split(',').map((f) => f.trim()).filter(Boolean).map((f) => (
+                <Tag key={f} color="geekblue" style={{ fontSize: 11 }}>{f}</Tag>
+              ))}
+            </Space>
+          </div>
+        )}
+
+        {/* First / Last seen */}
+        {(record?.FirstSeen || record?.LastSeen) && (
+          <Space size={24}>
+            {record.FirstSeen && (
+              <div>
+                <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>First seen</Text>
+                <Text style={{ fontSize: 12 }}>{String(record.FirstSeen).slice(0, 16).replace('T', ' ')}</Text>
+              </div>
+            )}
+            {record.LastSeen && (
+              <div>
+                <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Last seen</Text>
+                <Text style={{ fontSize: 12 }}>{String(record.LastSeen).slice(0, 16).replace('T', ' ')}</Text>
+              </div>
+            )}
+          </Space>
+        )}
+
+        {/* Cross-reference: involved users (for Device) or involved devices (for User) */}
+        {!loading && involvedUsers.length > 0 && (
+          <div>
+            <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, display: 'block', marginBottom: 4 }}>
+              <UserOutlined style={{ marginRight: 4 }} />
+              Involved users ({involvedUsers.length})
+            </Text>
+            <Space size={4} wrap>
+              {involvedUsers.map((u) => (
+                <Tag key={u} icon={<UserOutlined />} style={{ fontSize: 11 }}>{u}</Tag>
+              ))}
+            </Space>
+          </div>
+        )}
+        {!loading && involvedDevices.length > 0 && (
+          <div>
+            <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, display: 'block', marginBottom: 4 }}>
+              <LaptopOutlined style={{ marginRight: 4 }} />
+              Involved devices ({involvedDevices.length})
+            </Text>
+            <Space size={4} wrap>
+              {involvedDevices.map((d) => (
+                <Tag key={d} icon={<LaptopOutlined />} style={{ fontSize: 11 }}>{d}</Tag>
+              ))}
+            </Space>
+          </div>
         )}
 
         {/* Score history sparkline */}

@@ -53,6 +53,34 @@ def _read_sheet(xl: pd.ExcelFile, name: str) -> Optional[pd.DataFrame]:
     return df if not df.empty else pd.DataFrame(columns=df.columns)
 
 
+def _enrich_behavior_families(
+    seasons_df: Optional[pd.DataFrame],
+    entity_col: str,
+    episodes_df: Optional[pd.DataFrame],
+) -> Optional[pd.DataFrame]:
+    """Add BehaviorFamilies column to a seasons DataFrame by aggregating from episodes."""
+    if seasons_df is None or seasons_df.empty:
+        return seasons_df
+    if episodes_df is None or episodes_df.empty or "BehaviorFamilies" not in episodes_df.columns:
+        seasons_df = seasons_df.copy()
+        seasons_df["BehaviorFamilies"] = ""
+        return seasons_df
+
+    entity_to_families: dict = {}
+    for entity, group in episodes_df.groupby(entity_col):
+        families: set = set()
+        for bf_str in group["BehaviorFamilies"].dropna():
+            for f in str(bf_str).split(","):
+                f = f.strip()
+                if f and f != "Unknown":
+                    families.add(f)
+        entity_to_families[entity] = ", ".join(sorted(families))
+
+    seasons_df = seasons_df.copy()
+    seasons_df["BehaviorFamilies"] = seasons_df[entity_col].map(entity_to_families).fillna("")
+    return seasons_df
+
+
 def load_from_excel(path: str) -> None:
     """
     Read all module data from the given Excel workbook into memory.
@@ -71,6 +99,8 @@ def load_from_excel(path: str) -> None:
     state.loaded_file = os.path.basename(path)
     state.is_loaded = True
     xl.close()
+    state.device_seasons = _enrich_behavior_families(state.device_seasons, "DeviceName", state.device_episodes)
+    state.user_seasons   = _enrich_behavior_families(state.user_seasons,   "AccountName", state.user_episodes)
     _apply_suppressions()
 
 
@@ -242,6 +272,7 @@ def _rebuild_priority_cases() -> None:
     priority_cols = [
         "EntityType", "EntityName", "CompositeScore", "TotalRisk", "HistoricalPriority",
         "RiskPercentile", "EpisodeCount", "TotalScenes", "UniqueTactics", "TacticSet",
+        "BehaviorFamilies",
         "PrimaryWorkflowClass", "AIWorkflowScenePct",
         "MaxEpisodeRisk", "FirstSeen", "LastSeen",
         "ZScore", "IsNewHigh", "IsScoreSpike", "IsTacticExpansion",

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { Input, Select, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import { SearchOutlined } from '@ant-design/icons'
 import { api } from '../api'
+import { ColHeader } from '../components/ColHeader'
 import EmptyState from '../components/EmptyState'
 import { useEntityContextMenu } from '../components/EntityContextMenu'
 import { useEntityDetailDrawer } from '../components/EntityDetailDrawer'
@@ -41,7 +42,7 @@ function AnomalyFlags({ record }) {
 
 const COLUMNS = [
   {
-    title: 'Type',
+    title: <ColHeader label="Type" tip="Whether this entity is a Device (hostname) or User (account name)." />,
     dataIndex: 'EntityType',
     key: 'EntityType',
     width: 70,
@@ -52,14 +53,14 @@ const COLUMNS = [
     onFilter: (v, r) => r.EntityType === v,
   },
   {
-    title: 'Entity',
+    title: <ColHeader label="Entity" tip="Device hostname or user account name observed in detections." />,
     dataIndex: 'EntityName',
     key: 'EntityName',
     ellipsis: true,
     render: (v) => <Text code style={{ fontSize: 12 }}>{v}</Text>,
   },
   {
-    title: 'Score',
+    title: <ColHeader label="Score" tip="Composite ranking score = TotalRisk + HistoricalPriority × weight. Used to order this list — hover a cell to see the breakdown." />,
     dataIndex: 'CompositeScore',
     key: 'CompositeScore',
     width: 80,
@@ -74,7 +75,7 @@ const COLUMNS = [
     ),
   },
   {
-    title: 'Risk',
+    title: <ColHeader label="Risk" tip="TotalRisk — weighted sum of episode scores using diminishing returns by episode rank and repeated behavior family." />,
     dataIndex: 'TotalRisk',
     key: 'TotalRisk',
     width: 75,
@@ -82,7 +83,7 @@ const COLUMNS = [
     render: (v) => <Text style={{ fontSize: 11, color: RISK_COLOR(v ?? 0) }}>{v?.toFixed(1) ?? '—'}</Text>,
   },
   {
-    title: 'HP',
+    title: <ColHeader label="HP" tip="Historical Priority — anomaly bonus derived from Z-score and anomaly flags (Spike, NewHigh, TacticExp, Adapting, Emerging). Surfaces entities that changed significantly vs their baseline." />,
     dataIndex: 'HistoricalPriority',
     key: 'HistoricalPriority',
     width: 60,
@@ -92,28 +93,28 @@ const COLUMNS = [
       : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>,
   },
   {
-    title: 'Pct',
+    title: <ColHeader label="Pct" tip="Risk percentile — how this entity ranks relative to all entities in the current run (100% = highest risk)." />,
     dataIndex: 'RiskPercentile',
     key: 'RiskPercentile',
     width: 55,
     render: (v) => (v != null ? `${v}%` : '—'),
   },
   {
-    title: 'Tactics',
+    title: <ColHeader label="Tactics" tip="Number of distinct MITRE ATT&CK tactics observed across all episodes. Higher counts indicate broader attack coverage." />,
     dataIndex: 'UniqueTactics',
     key: 'UniqueTactics',
     width: 70,
     sorter: (a, b) => (a.UniqueTactics ?? 0) - (b.UniqueTactics ?? 0),
   },
   {
-    title: 'Tactic Set',
+    title: <ColHeader label="Tactic Set" tip="Full list of MITRE ATT&CK tactics seen across all episodes for this entity, sorted alphabetically." />,
     dataIndex: 'TacticSet',
     key: 'TacticSet',
     ellipsis: true,
     render: (v) => <Tooltip title={v}><Text style={{ fontSize: 11 }}>{v}</Text></Tooltip>,
   },
   {
-    title: 'Workflow',
+    title: <ColHeader label="Workflow" tip="Primary workflow classification: Operational (standard endpoint), AIWorkflow (AI agent activity), DeveloperAutomation (IDE/dev tooling). AI/Dev entities need ≥2 tactics to reach Priority Cases." />,
     dataIndex: 'PrimaryWorkflowClass',
     key: 'PrimaryWorkflowClass',
     width: 120,
@@ -125,7 +126,7 @@ const COLUMNS = [
     onFilter: (v, r) => r.PrimaryWorkflowClass === v,
   },
   {
-    title: 'AI%',
+    title: <ColHeader label="AI%" tip="Percentage of detection scenes classified as AI agent activity (e.g. Claude, Copilot, local LLM). 0% = no AI context; high % = most activity is AI-generated." />,
     dataIndex: 'AIWorkflowScenePct',
     key: 'AIWorkflowScenePct',
     width: 60,
@@ -137,14 +138,14 @@ const COLUMNS = [
     ) : '—',
   },
   {
-    title: 'Episodes',
+    title: <ColHeader label="Episodes" tip="Number of detection episodes — clusters of scenes on the same entity within a 4-hour sliding window." />,
     dataIndex: 'EpisodeCount',
     key: 'EpisodeCount',
     width: 80,
     sorter: (a, b) => (a.EpisodeCount ?? 0) - (b.EpisodeCount ?? 0),
   },
   {
-    title: 'Anomalies',
+    title: <ColHeader label="Anomalies" tip="Historical anomaly flags: Spike = score >2.5× baseline mean; NewHigh = all-time high; TacticExp = more tactics than ever before; Adapting = new tactic not seen in prior runs; Emerging = new entity with elevated score." />,
     key: 'anomalies',
     width: 200,
     render: (_, r) => <AnomalyFlags record={r} />,
@@ -158,6 +159,7 @@ export default function PriorityPage() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [tacticFilter, setTacticFilter] = useState([])
+  const [familyFilter, setFamilyFilter] = useState([])
   const { pipelineStatus } = useApp()
   const { openDetail, entityDetailDrawer } = useEntityDetailDrawer()
   const { onRow, contextMenuPortal, suppressModal } = useEntityContextMenu({ onViewDetails: openDetail })
@@ -187,12 +189,23 @@ export default function PriorityPage() {
     return [...set].sort()
   }, [data])
 
+  const allFamilies = useMemo(() => {
+    const set = new Set()
+    data.forEach((r) => {
+      if (r.BehaviorFamilies) r.BehaviorFamilies.split(',').forEach((f) => { const s = f.trim(); if (s) set.add(s) })
+    })
+    return [...set].sort()
+  }, [data])
+
   const filtered = useMemo(() => {
     let result = data
     if (search) {
       const q = search.toLowerCase()
       result = result.filter(
-        (r) => r.EntityName?.toLowerCase().includes(q) || r.TacticSet?.toLowerCase().includes(q),
+        (r) =>
+          r.EntityName?.toLowerCase().includes(q) ||
+          r.TacticSet?.toLowerCase().includes(q) ||
+          r.BehaviorFamilies?.toLowerCase().includes(q),
       )
     }
     if (tacticFilter.length > 0) {
@@ -201,8 +214,14 @@ export default function PriorityPage() {
         return tacticFilter.every((t) => tactics.includes(t))
       })
     }
+    if (familyFilter.length > 0) {
+      result = result.filter((r) => {
+        const families = (r.BehaviorFamilies ?? '').split(',').map((f) => f.trim())
+        return familyFilter.every((f) => families.includes(f))
+      })
+    }
     return result
-  }, [data, search, tacticFilter])
+  }, [data, search, tacticFilter, familyFilter])
 
   if (!loading && !pipelineStatus.is_loaded) return <EmptyState />
 
@@ -214,11 +233,11 @@ export default function PriorityPage() {
       <Space style={{ marginBottom: 12 }} wrap>
         <Input
           prefix={<SearchOutlined />}
-          placeholder="Search entity or tactic…"
+          placeholder="Search entity, tactic or family…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           allowClear
-          style={{ width: 240 }}
+          style={{ width: 260 }}
         />
         <Select
           mode="multiple"
@@ -230,9 +249,19 @@ export default function PriorityPage() {
           style={{ minWidth: 220 }}
           maxTagCount={2}
         />
+        <Select
+          mode="multiple"
+          allowClear
+          placeholder="Filter by behavior family…"
+          value={familyFilter}
+          onChange={setFamilyFilter}
+          options={allFamilies.map((f) => ({ label: f, value: f }))}
+          style={{ minWidth: 220 }}
+          maxTagCount={2}
+        />
         <Text type="secondary" style={{ fontSize: 12 }}>
           {filtered.length} case{filtered.length !== 1 ? 's' : ''}
-          {(search || tacticFilter.length > 0) ? ` (filtered from ${data.length})` : ''}
+          {(search || tacticFilter.length > 0 || familyFilter.length > 0) ? ` (filtered from ${data.length})` : ''}
         </Text>
       </Space>
       <Table
