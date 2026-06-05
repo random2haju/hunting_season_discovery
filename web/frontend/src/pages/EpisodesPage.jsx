@@ -154,18 +154,95 @@ function ScoreCell({ record }) {
   )
 }
 
-const SCENE_COLS = [
-  { title: 'Timestamp', dataIndex: 'Timestamp', key: 'Timestamp', width: 160,
-    render: (v) => v ? v.replace('T', ' ') : '—' },
-  { title: 'Detection', dataIndex: 'DetectionType', key: 'DetectionType', ellipsis: true },
-  { title: 'Tactic', dataIndex: 'TacticCategory', key: 'TacticCategory', width: 130 },
-  { title: 'Score', key: 'ScoreContribution', width: 70,
-    render: (_, record) => <ScoreCell record={record} /> },
-  { title: 'Evidence', dataIndex: 'Evidence', key: 'Evidence',
-    render: (v) => <EvidenceCell value={v} /> },
-]
+// Prevalence badge derived from EnvDeviceCount
+function PrevalenceBadge({ count }) {
+  if (count == null) return null
+  if (count >= 10) {
+    return (
+      <Tooltip title={`Seen on ${count} devices — widespread, likely noisy`}>
+        <Tag color="default" style={{ fontSize: 10, margin: 0 }}>×{count} widespread</Tag>
+      </Tooltip>
+    )
+  }
+  if (count <= 2) {
+    return (
+      <Tooltip title={`Seen on only ${count} device${count === 1 ? '' : 's'} — rare signal`}>
+        <Tag color="green" style={{ fontSize: 10, margin: 0 }}>×{count} rare</Tag>
+      </Tooltip>
+    )
+  }
+  return (
+    <Tooltip title={`Seen on ${count} devices`}>
+      <Tag style={{ fontSize: 10, margin: 0 }}>×{count}</Tag>
+    </Tooltip>
+  )
+}
 
-function EpisodeCard({ ep, scenes }) {
+const WORKFLOW_COLORS = {
+  AIWorkflow:           'purple',
+  DeveloperAutomation:  'blue',
+  Operational:          'default',
+}
+
+function makeSceneCols(mode) {
+  const crossCol = mode === 'Device'
+    ? {
+        title: 'Account',
+        dataIndex: 'AccountName',
+        key: 'AccountName',
+        width: 120,
+        ellipsis: true,
+        render: (v) => v ? <Text code style={{ fontSize: 11 }}>{v}</Text> : <Text type="secondary">—</Text>,
+      }
+    : {
+        title: 'Device',
+        dataIndex: 'DeviceName',
+        key: 'DeviceName',
+        width: 140,
+        ellipsis: true,
+        render: (v) => v ? <Text code style={{ fontSize: 11 }}>{v}</Text> : <Text type="secondary">—</Text>,
+      }
+
+  return [
+    {
+      title: 'Timestamp', dataIndex: 'Timestamp', key: 'Timestamp', width: 150,
+      render: (v) => v ? v.replace('T', ' ') : '—',
+    },
+    crossCol,
+    {
+      title: 'Detection', dataIndex: 'DetectionType', key: 'DetectionType', ellipsis: true,
+    },
+    {
+      title: 'Family', dataIndex: 'BehaviorFamily', key: 'BehaviorFamily', width: 130,
+      render: (v) => v && v !== 'Unknown'
+        ? <Tag color="geekblue" style={{ fontSize: 10, margin: 0 }}>{v}</Tag>
+        : null,
+    },
+    {
+      title: 'Workflow', dataIndex: 'WorkflowClass', key: 'WorkflowClass', width: 100,
+      render: (v) => v
+        ? <Tag color={WORKFLOW_COLORS[v] ?? 'default'} style={{ fontSize: 10, margin: 0 }}>{v}</Tag>
+        : null,
+    },
+    {
+      title: 'Tactic', dataIndex: 'TacticCategory', key: 'TacticCategory', width: 120,
+    },
+    {
+      title: 'Score', key: 'ScoreContribution', width: 70,
+      render: (_, record) => <ScoreCell record={record} />,
+    },
+    {
+      title: 'Prevalence', dataIndex: 'EnvDeviceCount', key: 'EnvDeviceCount', width: 110,
+      render: (v) => <PrevalenceBadge count={v} />,
+    },
+    {
+      title: 'Evidence', dataIndex: 'Evidence', key: 'Evidence',
+      render: (v) => <EvidenceCell value={v} />,
+    },
+  ]
+}
+
+function EpisodeCard({ ep, scenes, mode }) {
   const tactics = ep.Tactics?.split(', ').filter(Boolean) ?? []
   const families = ep.BehaviorFamilies?.split(', ').filter(Boolean) ?? []
 
@@ -174,6 +251,13 @@ function EpisodeCard({ ep, scenes }) {
     const ts = s.Timestamp
     return ts >= ep.StartTime && ts <= ep.EndTime
   })
+
+  // Distinct cross-reference identities in this episode
+  const crossKey = mode === 'Device' ? 'AccountName' : 'DeviceName'
+  const crossLabel = mode === 'Device' ? 'Users' : 'Devices'
+  const crossIds = [...new Set(epScenes.map((s) => s[crossKey]).filter(Boolean))].sort()
+
+  const sceneCols = makeSceneCols(mode)
 
   return (
     <Collapse
@@ -194,6 +278,14 @@ function EpisodeCard({ ep, scenes }) {
               {tactics.map((t) => <Tag key={t} style={{ fontSize: 10 }}>{t}</Tag>)}
               {ep.AdaptiveBehaviorFlag && <Tag color="volcano">Adaptive</Tag>}
               {ep.TacticTransitions && <Tag color="purple">Transition</Tag>}
+              {crossIds.length > 0 && (
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  {crossLabel}:{' '}
+                  {crossIds.map((id) => (
+                    <Tag key={id} style={{ fontSize: 10, margin: '0 2px' }}>{id}</Tag>
+                  ))}
+                </Text>
+              )}
             </Space>
           ),
           children: (
@@ -211,11 +303,11 @@ function EpisodeCard({ ep, scenes }) {
               )}
               <Table
                 dataSource={epScenes.length ? epScenes : scenes.slice(0, 0)}
-                columns={SCENE_COLS}
+                columns={sceneCols}
                 rowKey={(r, i) => i}
                 size="small"
                 pagination={false}
-                scroll={{ x: 700 }}
+                scroll={{ x: 900 }}
                 locale={{ emptyText: 'No scenes matched this time window' }}
               />
             </Space>
@@ -393,7 +485,7 @@ export default function EpisodesPage() {
               </Button>
             </Space>
             {detail.episodes.map((ep, i) => (
-              <EpisodeCard key={i} ep={ep} scenes={detail.scenes ?? []} />
+              <EpisodeCard key={i} ep={ep} scenes={detail.scenes ?? []} mode={mode} />
             ))}
           </>
         )}
