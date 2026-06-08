@@ -850,29 +850,48 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
     """
     Aggregate episodes into season-level summary per entity.
 
-    TotalRisk uses diminishing-returns weighting rather than a plain sum so
-    that story quality beats story length:
-      - Episodes sorted descending by EpisodeRiskScore; each successive episode
-        earns a lower rank_weight via 1/log2(rank+2).
-      - Repeated same-dominant-family episodes decay exponentially so a device
-        with 20 identical bash episodes scores much lower than one with
-        bash + credential dump + lateral movement across a handful of episodes.
+    TotalRisk uses a two-stage diminishing-returns model rather than a plain sum
+    so that variety (breadth of distinct behaviors) beats repetition:
+      - Stage 1 — within each BehaviorFamily, the family's best episode counts
+        fully and each additional same-family episode decays exponentially
+        (same_family_decay_factor). This collapses each family to one value and
+        is the repetition penalty.
+      - Stage 2 — distinct families are ranked best-to-worst and a log rank
+        weight (1/log_base(rank+2)) is applied across *families*, not raw
+        episodes. This is a bounded breadth dampener (there is a fixed set of
+        families) that keeps a pile of low-severity behaviors from out-scoring
+        one critical case, while never burying a novel high-value family behind
+        repeats of a different one.
+
+    Net effect: a device with 20 identical bash episodes scores much lower than
+    one showing bash + credential dump + lateral movement, and a single rare
+    credential-dump episode is no longer discounted just because noisier
+    families happened to out-score it.
     """
     cfg = cfg or {}
     tactic_cols = list(tactic_weights.keys())
 
-    # Per-entity tactic score breakdown from scenes (unchanged)
-    tactic_scores = (
+    # Per-entity tactic score breakdown from scenes.
+    tactic_score_matrix = (
         scenes.groupby([entity_col, "TacticCategory"])["ScoreContribution"]
         .sum()
         .unstack(fill_value=0)
-        .reindex(columns=tactic_cols, fill_value=0)
     )
+    # Tactics not in tactic_weights (scored as 1 on load) are summed into a
+    # Score_Other catch-all so the per-tactic breakdown reconciles with TotalRisk
+    # instead of silently dropping their contribution.
+    other_cols = [c for c in tactic_score_matrix.columns if c not in tactic_cols]
+    tactic_scores = tactic_score_matrix.reindex(columns=tactic_cols, fill_value=0)
     tactic_scores.columns = [f"Score_{c}" for c in tactic_scores.columns]
+    if other_cols:
+        tactic_scores["Score_Other"] = tactic_score_matrix[other_cols].sum(axis=1)
 
     # Diminishing-returns config
     dr_cfg       = cfg.get("season_diminishing_returns", {})
     log_base     = dr_cfg.get("diminishing_log_base", 2.0)
+    if log_base <= 1.0:
+        print(f"  [WARN] diminishing_log_base={log_base} invalid (must be > 1); using 2.0")
+        log_base = 2.0
     decay_after  = dr_cfg.get("same_family_decay_after", 1)
     decay_factor = dr_cfg.get("same_family_decay_factor", 0.5)
 
@@ -890,22 +909,32 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
     season_records = []
     for entity, ep_group in episodes.groupby(entity_col):
         ep_group = ep_group.sort_values("EpisodeRiskScore", ascending=False)
-        dom_counter: dict = {}
-        total_risk = 0.0
-        for rank, (_, ep_row) in enumerate(ep_group.iterrows()):
-            ep_score = ep_row["EpisodeRiskScore"]
-            # Dominant family = highest score contributor in this episode (set by build_episodes)
+        # --- Two-stage diminishing returns ----------------------------------
+        # Stage 1: collapse each BehaviorFamily on its own. The family's best
+        # episode counts fully; each additional same-family episode decays
+        # exponentially (repetition penalty), independent of global ordering.
+        family_scores: dict = {}
+        for _, ep_row in ep_group.iterrows():
             dominant = ep_row.get("DominantFamily", "Unknown") or "Unknown"
+            family_scores.setdefault(dominant, []).append(ep_row["EpisodeRiskScore"])
 
-            # Log-based rank weight: best episode gets 1.0, each subsequent gets less
-            rank_weight = 1.0 / math.log(rank + 2, log_base)
+        family_values = []
+        for scores in family_scores.values():
+            scores.sort(reverse=True)  # best episode of the family first
+            family_values.append(sum(
+                s * (decay_factor ** max(0, i - decay_after + 1) if i >= decay_after else 1.0)
+                for i, s in enumerate(scores)
+            ))
 
-            # Exponential decay for repeated same-dominant-family episodes
-            prior = dom_counter.get(dominant, 0)
-            family_weight = decay_factor ** max(0, prior - decay_after + 1) if prior >= decay_after else 1.0
-            dom_counter[dominant] = prior + 1
-
-            total_risk += ep_score * rank_weight * family_weight
+        # Stage 2: rank distinct families best-to-worst and apply the log rank
+        # decay across *families* (bounded breadth dampener) — so a novel
+        # high-value family is never buried behind repeats of another.
+        family_values.sort(reverse=True)
+        total_risk = sum(
+            fam_value / math.log(rank + 2, log_base)
+            for rank, fam_value in enumerate(family_values)
+        )
+        # --------------------------------------------------------------------
 
         season_records.append({
             entity_col:       entity,
@@ -931,7 +960,8 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
         })
 
     ep_summary = pd.DataFrame(season_records).set_index(entity_col)
-    seasons = ep_summary.join(tactic_scores, how="left").fillna(0)
+    seasons = ep_summary.join(tactic_scores, how="left")
+    seasons[tactic_scores.columns] = seasons[tactic_scores.columns].fillna(0)
 
     # Behavioral diversity: unique normalized evidence patterns and detection methods per entity
     ev_col = "EvidenceNormalized" if "EvidenceNormalized" in scenes.columns else "Evidence"
@@ -939,7 +969,8 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
         UniqueEvidenceCount=(ev_col, "nunique"),
         UniqueDetectionTypes=("DetectionType", "nunique"),
     )
-    seasons = seasons.join(diversity, how="left").fillna(0)
+    seasons = seasons.join(diversity, how="left")
+    seasons[diversity.columns] = seasons[diversity.columns].fillna(0)
     seasons["UniqueEvidenceCount"] = seasons["UniqueEvidenceCount"].astype(int)
     seasons["UniqueDetectionTypes"] = seasons["UniqueDetectionTypes"].astype(int)
 
