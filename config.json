@@ -28,7 +28,6 @@
       {"tactics": ["Persistence",      "DefenseEvasion"],    "multiplier": 1.3},
       {"tactics": ["Persistence",      "CommandAndControl"], "multiplier": 1.4},
       {"tactics": ["Persistence",      "Exfiltration"],      "multiplier": 1.4},
-      {"tactics": ["DefenseEvasion",   "Persistence"],       "multiplier": 1.3},
       {"tactics": ["Collection",       "Exfiltration"],      "multiplier": 1.5}
     ],
     "max_multiplier": 2.5
@@ -178,6 +177,7 @@
     "bonus_per_additional_family": 1.4,
     "max_bonus_multiplier":        5.0
   },
+  "max_episode_multiplier": 6.0,
   "season_diminishing_returns": {
     "diminishing_log_base":     2.0,
     "same_family_decay_after":  1,

@@ -138,11 +138,13 @@ High-signal detections carry additional multipliers on top of tactic weights:
 
 ### Episode scoring
 
-Each episode score starts from the sum of its scenes' adjusted `ScoreContribution` values, then applies three multiplicative layers:
+Each episode score starts from the sum of its scenes' adjusted `ScoreContribution` values (`BaseEpisodeScore`), then applies three multiplicative layers, whose product is capped at `max_episode_multiplier` (default 6×):
 
-1. **Corroboration bonus** — reward for mixing multiple behavior families (2 families → 1.4×, 3 → 1.96×, capped at 5×)
-2. **ATT&CK transition bonus** — reward for known kill-chain progressions (e.g. CredentialAccess → Exfiltration = 1.5×), all matching pairs stack multiplicatively, capped at 2.5×
+1. **Corroboration bonus** — reward for mixing multiple behavior families that contributed score (2 families → 1.4×, 3 → 1.96×, capped at 5×)
+2. **Tactic co-occurrence bonus** — reward when an episode's tactics span known ATT&CK relationship pairs (e.g. CredentialAccess + Exfiltration = 1.5×); order-insensitive co-occurrence within the episode window, all matching pairs stack multiplicatively, capped at 2.5×
 3. **Variation clustering bonus** — +15% when the same tool class is used with 3+ distinct evidence strings in one episode (automated try-and-adjust behavior)
+
+Layers 1 and 2 are **damped by the episode's AI share** (`ai_share`): a pure-AI episode keeps neither bonus, a pure-traditional episode keeps both in full, mixed episodes scale between. Layer 3 is never damped. `EpisodeRiskScore = BaseEpisodeScore × EffectiveMultiplier`.
 
 ### Season scoring
 
@@ -219,8 +221,9 @@ All scoring parameters live in `config.json`. Key sections:
 - `execution_trust_tiers` + `execution_tier_multipliers` — tiered scoring for shell/execution scenes (Jupyter, Shadow AI)
 - `cmdline_risk_patterns` + `cmdline_risk_multipliers` — command-line shape scoring applied to all AI scenes
 - `behavior_families` + `episode_family_cap` — per-episode family caps (MCPAbuse, AgentAttack, ModelTheft, etc.)
-- `corroboration_bonus` — cross-family corroboration reward
-- `tactic_transitions` — ATT&CK kill-chain progression pairs and multipliers
+- `corroboration_bonus` — cross-family corroboration reward (damped by AI share)
+- `tactic_transitions` — ATT&CK tactic co-occurrence pairs and multipliers (order-insensitive within the episode window)
+- `max_episode_multiplier` — aggregate cap on the compounded episode multiplier (default 6.0)
 - `adaptive_behavior` — variation cluster threshold and score bonus
 - `attack_chain_hygiene` — account exclusion lists and fan-out threshold
 - `season_diminishing_returns` — log-based rank weighting and family decay

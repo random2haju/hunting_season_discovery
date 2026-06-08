@@ -107,6 +107,19 @@ Pipeline order: `load_scenes` → `apply_prevalence_scoring` → `assign_episode
 ### Prevalence scoring
 `apply_prevalence_scoring()` adjusts each scene's `ScoreContribution` using per-`Evidence` device counts (not per `DetectionType` — that would incorrectly collapse all hits of one detection type into one bucket). Thresholds and multipliers live in `config.json`.
 
+### Episode multiplier model & AI damping
+`build_episodes()` computes `EpisodeRiskScore = BaseEpisodeScore × EffectiveMultiplier`, where:
+- **`BaseEpisodeScore`** — sum of per-scene `ScoreContribution` after the per-family cap (zeroed scenes contribute 0 and do not consume cap budget).
+- **`EffectiveMultiplier`** = `min(corroboration_eff × transition_eff × variation, max_episode_multiplier)`.
+
+**AI damping** replaces the old binary "all-AI → no bonus" gate. Each structural bonus is scaled toward 1.0 by the episode's AI share:
+```
+ai_share        = Σ(AI-family adjusted score) / BaseEpisodeScore      # 0 when base is 0
+corroboration_eff = 1 + (CorroborationMult   − 1) × (1 − ai_share)
+transition_eff    = 1 + (TacticTransitionMult − 1) × (1 − ai_share)
+```
+A pure-AI episode (`ai_share = 1`) collapses both bonuses to 1.0 (preserving the old behavior at the extreme); a pure-traditional episode (`ai_share = 0`) keeps the full bonus; mixed episodes are damped in proportion to AI-score dominance. **Variation/adaptive bonus is never damped** — try-and-adjust is the canonical AI signal. The `CorroborationMult` and `TacticTransitionMult` columns store the **raw structural** bonus (no longer zeroed for AI episodes); `AIShare` and `EffectiveMultiplier` columns let an analyst reconstruct the final score.
+
 ### Excel output structure
 Sheets in order:
 1. **Priority Cases** — primary analyst view; eligible entities only, ranked by `TotalRisk`. AI/Dev-dominated single-tactic entities and analyst-suppressed entities are excluded here.
@@ -177,8 +190,9 @@ New tactic categories not already in `config.json` will score as 1 and log a war
 | `behavior_families` | Maps each DetectionType to a BehaviorFamily string (e.g. `LOLBin Execution` → `ShellExecution`). Used for per-episode family caps and corroboration bonuses. |
 | `episode_family_cap` | Max scenes per BehaviorFamily per episode that contribute full score (default 3). Beyond this, `episode_family_cap_multipliers[family]` is applied. |
 | `episode_family_cap_multipliers` | Per-family over-cap multiplier (e.g. `ShellExecution`=0.15). High-value families like CredentialDump default to 1.0 (no reduction). |
-| `corroboration_bonus` | Reward episodes that mix behavior families. `min_families_for_bonus`=2, `bonus_per_additional_family`=1.4 (2 families → 1.4×, 3 → 1.96×), `max_bonus_multiplier`=5.0. |
-| `tactic_transitions` | Reward episodes whose tactic set spans known ATT&CK progressions (e.g. CredentialAccess+LateralMovement). Each matching pair contributes a multiplier; all matching pairs stack multiplicatively, capped at `max_multiplier` (default 2.0). Adds `TacticTransitionMult` and `TacticTransitions` columns to Episodes sheet. |
+| `corroboration_bonus` | Reward episodes that mix behavior families. `min_families_for_bonus`=2, `bonus_per_additional_family`=1.4 (2 families → 1.4×, 3 → 1.96×), `max_bonus_multiplier`=5.0. Counts only families that contributed non-zero score. The structural bonus (`CorroborationMult` column) is then **damped** by the episode's AI share before being applied — see AI damping below. |
+| `tactic_transitions` | Reward episodes whose tactic set spans known ATT&CK relationship pairs (e.g. CredentialAccess+LateralMovement). **Matching is order-insensitive co-occurrence within the episode window, not temporal progression** — the "transition" name is historical. Symmetric duplicate pairs are deduped so one relationship can't double-count. Each matching pair contributes a multiplier; all stack multiplicatively, capped at `max_multiplier` (default 2.0). The structural bonus (`TacticTransitionMult` column) is then damped by AI share. Adds `TacticTransitionMult` and `TacticTransitions` columns to Episodes sheet. |
+| `max_episode_multiplier` | Aggregate cap on the compounded episode multiplier (default 6.0). `EpisodeRiskScore = BaseEpisodeScore × min(corroboration_eff × transition_eff × variation, max_episode_multiplier)`. Bounds correlated signals (corroboration + transition + variation) from stacking without limit — worst case was ~14.4× before this cap. |
 | `adaptive_behavior.variation_cluster_min_size` | Minimum number of distinct Evidence strings within one (device, DetectionType) group in a single episode to declare a variation cluster (default 3). A cluster indicates automated try-and-adjust behavior — the same tool used against many distinct targets in rapid succession. |
 | `adaptive_behavior.variation_score_bonus` | Multiplicative bonus applied to `EpisodeRiskScore` when at least one variation cluster is detected (default 1.15 = +15%). Intentionally small to surface adaptive episodes slightly higher without overriding tactic weight or prevalence. Raise to 1.3–1.5 in high-confidence environments. |
 | `attack_chain_hygiene.fan_out_threshold` | Accounts appearing on ≥ N devices within a chain are flagged `IsFanOut=True` (default 3). Adds `IsFanOut` and `MaxAccountFanOut` columns to Attack Chains sheet. |
@@ -207,7 +221,7 @@ After each run the script appends one record per device and user to `output/hunt
 
 `PreviousScore`, `BaselineMean`, `BaselineMedian`, `BaselineStdDev`, `HistoricalMax`, `RunCount`, `ScoreDelta`, `ScoreDeltaPct`, `ZScore`, `IsNewHigh`, `IsScoreSpike`, `IsEmergingEntity`, `IsTacticExpansion`, `IsAdaptingTactics`, `NewTactics`
 
-Episodes sheet also gains: `VariationClusterCount`, `LargestVariationCluster`, `AdaptiveBehaviorFlag`, `AdaptiveBehaviorReason`.
+Episodes sheet also gains: `VariationClusterCount`, `LargestVariationCluster`, `AdaptiveBehaviorFlag`, `AdaptiveBehaviorReason`, `BaseEpisodeScore`, `AIShare`, `EffectiveMultiplier`.
 
 Device/User Seasons sheets also gain: `TacticSet`, `MaxEpisodeVariationCluster`, `AdaptiveEpisodeCount`.
 

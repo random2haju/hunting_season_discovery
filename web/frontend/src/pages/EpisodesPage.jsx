@@ -5,13 +5,13 @@
 
 import React, { useEffect, useRef, useState } from 'react'
 import {
-  Button, Col, Collapse, Empty, Input, List, Modal, Row, Segmented, Space, Spin, Table, Tag, Tooltip, Typography,
+  Button, Col, Collapse, Empty, Input, List, Modal, Popover, Row, Segmented, Space, Spin, Table, Tag, Tooltip, Typography,
 } from 'antd'
 import { CopyOutlined, HistoryOutlined, SearchOutlined, StopOutlined } from '@ant-design/icons'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import EmptyState from '../components/EmptyState'
-import { SuppressModal } from '../components/EntityDetailDrawer'
+import { ScoreBreakdown, SuppressModal } from '../components/EntityDetailDrawer'
 import { useApp } from '../context/AppContext'
 import { palette, riskColor as RISK_COLOR } from '../theme'
 
@@ -268,9 +268,25 @@ function EpisodeCard({ ep, scenes, mode }) {
           key: '1',
           label: (
             <Space wrap>
-              <Text strong style={{ color: RISK_COLOR(ep.EpisodeRiskScore ?? 0) }}>
-                {ep.EpisodeRiskScore?.toFixed(1) ?? '—'}
-              </Text>
+              <Popover
+                content={<ScoreBreakdown ep={ep} />}
+                title="Score breakdown"
+                trigger="hover"
+                mouseEnterDelay={0.3}
+                placement="rightTop"
+              >
+                <Text
+                  strong
+                  onClick={(e) => e.stopPropagation()}
+                  style={{
+                    color: RISK_COLOR(ep.EpisodeRiskScore ?? 0),
+                    cursor: 'help',
+                    borderBottom: `1px dotted ${palette.muted}`,
+                  }}
+                >
+                  {ep.EpisodeRiskScore?.toFixed(1) ?? '—'}
+                </Text>
+              </Popover>
               <Text type="secondary" style={{ fontSize: 11 }}>
                 {ep.StartTime?.replace('T', ' ')} — {ep.DurationHours?.toFixed(1)}h
               </Text>

@@ -610,7 +610,14 @@ def build_variation_clusters(g: "pd.DataFrame", cfg: dict) -> "tuple[int, int, b
 def compute_transition_bonus(tactic_set: set, cfg: dict) -> "tuple[float, list[str]]":
     """
     Compute a multiplicative bonus for episodes whose tactic set spans one or more
-    known ATT&CK progression pairs (e.g. CredentialAccess + LateralMovement).
+    known ATT&CK relationship pairs (e.g. CredentialAccess + LateralMovement).
+
+    IMPORTANT — semantics: matching is order-insensitive *co-occurrence* of the two
+    tactics within the episode, NOT temporal progression.  The "transition" name is
+    historical; an episode where LateralMovement precedes CredentialAccess still matches
+    the CredentialAccess/LateralMovement pair.  Co-occurrence within the (typically 4h)
+    episode window is itself the signal.  Symmetric duplicate pairs in config are deduped
+    via frozenset so one relationship cannot double-count.
 
     Pairs are defined in config.json under `tactic_transitions.pairs`.  All matching
     pair multipliers stack multiplicatively, capped at `tactic_transitions.max_multiplier`.
@@ -623,9 +630,16 @@ def compute_transition_bonus(tactic_set: set, cfg: dict) -> "tuple[float, list[s
 
     multiplier   = 1.0
     found: list  = []
+    seen: set    = set()   # dedupe symmetric duplicates so one relationship can't double-count
     for pair in pairs:
         tactics = pair.get("tactics", [])
-        if len(tactics) == 2 and tactics[0] in tactic_set and tactics[1] in tactic_set:
+        if len(tactics) != 2:
+            continue
+        key = frozenset(tactics)
+        if key in seen:
+            continue
+        if tactics[0] in tactic_set and tactics[1] in tactic_set:
+            seen.add(key)
             multiplier *= float(pair.get("multiplier", 1.0))
             found.append(f"{tactics[0]}\u2192{tactics[1]}")
 
@@ -654,6 +668,7 @@ def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict, 
     min_fam         = corr_cfg.get("min_families_for_bonus", 2)
     bonus_per       = corr_cfg.get("bonus_per_additional_family", 1.4)
     max_bonus       = corr_cfg.get("max_bonus_multiplier", 5.0)
+    max_episode_mult = cfg.get("max_episode_multiplier", 6.0)
 
     records = []
     for (entity, ep_id), g in grp:
@@ -664,46 +679,73 @@ def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict, 
         # not alphabetically.
         family_counter: dict = {}
         family_scores: dict = {}   # family -> total adjusted score (excludes "Unknown")
+        contributing_tactics: set = set()  # tactics whose scenes actually scored (> 0)
         adj_scores = []
+        ai_score = 0.0   # adjusted score contributed by AI-family scenes (for AI-damping)
         for _, row in g.iterrows():
             fam = row.get("BehaviorFamily", "Unknown")
+            sc  = row["ScoreContribution"]
+            # Scenes zeroed upstream (scene-cap / full discounts) contribute nothing and
+            # must not consume family-cap budget — otherwise they would push genuine
+            # high-value scenes of the same family over the cap and crush them.
+            if not sc:
+                adj_scores.append(0.0)
+                continue
             family_counter[fam] = family_counter.get(fam, 0) + 1
             if family_counter[fam] > family_cap:
                 if fam not in family_cap_mults and fam != "Unknown":
                     print(f"  [WARN] BehaviorFamily '{fam}' not in episode_family_cap_multipliers — defaulting to 0.2")
                 over_cap_mult = family_cap_mults.get(fam, 0.2)
-                adj = row["ScoreContribution"] * over_cap_mult
+                adj = sc * over_cap_mult
             else:
-                adj = row["ScoreContribution"]
+                adj = sc
             adj_scores.append(adj)
+            contributing_tactics.add(row["TacticCategory"])
+            if row.get("Family", "Traditional") == "AI":
+                ai_score += adj
             if fam != "Unknown":
                 family_scores[fam] = family_scores.get(fam, 0.0) + adj
 
         base_score = sum(adj_scores)
 
+        # AI-damping share: fraction of the episode's scored risk that comes from AI
+        # detections. AI agents trip many AI-category detections across tactics by design,
+        # so the corroboration/transition bonuses are damped toward 1.0 in proportion to
+        # how AI-dominated the episode is. Pure-AI → bonuses collapse to 1.0 (preserving the
+        # old all-or-nothing behavior at the extreme); pure-traditional → full bonus.
+        ai_share = (ai_score / base_score) if base_score > 0 else 0.0
+
         # Corroboration bonus: reward episodes with multiple distinct behavior families.
-        # Suppressed for pure-AI episodes — AI detections span multiple MITRE tactics
-        # by design, not because an attacker is progressing through a kill chain.
-        unique_fams = set(g["BehaviorFamily"].dropna()) - {"Unknown"}
-        n_fams = len(unique_fams)
-        ai_only = "Family" in g.columns and (g["Family"].fillna("Traditional") == "AI").all()
-        if n_fams >= min_fam and not ai_only:
-            corr_mult = min(bonus_per ** (n_fams - min_fam + 1), max_bonus)
+        # Counts only families that actually contributed score (> 0) — a family whose
+        # scenes were all suppressed upstream is not real corroboration.  corr_raw is the
+        # structural bonus the episode earned; it is later damped by ai_share (see below).
+        scoring_fams = {f for f, s in family_scores.items() if s > 0}
+        n_fams = len(scoring_fams)
+        unique_fams = set(g["BehaviorFamily"].dropna()) - {"Unknown"}  # all present, for display
+        if n_fams >= min_fam:
+            corr_raw = min(bonus_per ** (n_fams - min_fam + 1), max_bonus)
         else:
-            corr_mult = 1.0
+            corr_raw = 1.0
 
         # Dominant family = highest adjusted-score contributor (not alphabetically first)
         dominant_family = max(family_scores, key=family_scores.get) if family_scores else "Unknown"
 
-        # ATT&CK transition bonus: multiplicative reward for known kill-chain progressions.
-        # Suppressed for pure-AI episodes for the same reason as corroboration above.
-        tactics = g["TacticCategory"].unique().tolist()
-        if ai_only:
-            transition_mult, transitions_found = 1.0, []
-        else:
-            transition_mult, transitions_found = compute_transition_bonus(set(tactics), cfg or {})
+        # Tactic co-occurrence bonus ("transition"): rewards episodes whose contributing
+        # tactics span known ATT&CK relationship pairs.  NOTE: matching is order-insensitive
+        # co-occurrence within the episode window, not temporal progression — the name is
+        # historical.  Matched against contributing tactics only, so a zeroed scene cannot
+        # complete a pair.  transition_raw is structural; damped by ai_share below.
+        tactics = g["TacticCategory"].unique().tolist()  # all present, for display
+        transition_raw, transitions_found = compute_transition_bonus(contributing_tactics, cfg or {})
 
-        # Variation clustering: detect try-and-adjust / AI-agent automated behavior
+        # AI-damping: scale each structural bonus toward 1.0 in proportion to the AI share
+        # of episode score.  ai_share=0 → full bonus; ai_share=1 → bonus collapses to 1.0.
+        damp = 1.0 - ai_share
+        corr_mult       = 1.0 + (corr_raw - 1.0) * damp
+        transition_mult = 1.0 + (transition_raw - 1.0) * damp
+
+        # Variation clustering: detect try-and-adjust / AI-agent automated behavior.
+        # Deliberately NOT damped by ai_share — try-and-adjust is the canonical AI signal.
         var_clusters, largest_cluster, adaptive_flag, adaptive_reason = \
             build_variation_clusters(g, cfg or {})
         ab_cfg = (cfg or {}).get("adaptive_behavior", {})
@@ -711,6 +753,10 @@ def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict, 
             float(ab_cfg.get("variation_score_bonus", 1.15))
             if adaptive_flag else 1.0
         )
+
+        # Aggregate cap: bound the compounding of the three multipliers so correlated
+        # signals cannot stack without limit (config max_episode_multiplier, default 6.0).
+        effective_mult = min(corr_mult * transition_mult * variation_mult, max_episode_mult)
 
         records.append({
             entity_col:               entity,
@@ -724,14 +770,17 @@ def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict, 
             "BehaviorFamilies":       ", ".join(sorted(unique_fams)),
             "DominantFamily":         dominant_family,
             "FamilyCount":            n_fams,
-            "CorroborationMult":      round(corr_mult, 3),
-            "TacticTransitionMult":   round(transition_mult, 3),
+            "CorroborationMult":      round(corr_raw, 3),
+            "TacticTransitionMult":   round(transition_raw, 3),
             "TacticTransitions":      ", ".join(transitions_found),
+            "AIShare":                round(ai_share, 3),
             "VariationClusterCount":  var_clusters,
             "LargestVariationCluster": largest_cluster,
             "AdaptiveBehaviorFlag":   adaptive_flag,
             "AdaptiveBehaviorReason": adaptive_reason,
-            "EpisodeRiskScore":       round(base_score * corr_mult * transition_mult * variation_mult, 2),
+            "BaseEpisodeScore":       round(base_score, 2),
+            "EffectiveMultiplier":    round(effective_mult, 3),
+            "EpisodeRiskScore":       round(base_score * effective_mult, 2),
         })
 
     return pd.DataFrame(records).sort_values("EpisodeRiskScore", ascending=False)

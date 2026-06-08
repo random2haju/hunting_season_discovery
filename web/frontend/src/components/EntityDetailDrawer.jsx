@@ -13,7 +13,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Button, Col, DatePicker, Drawer, Form, Input,
-  Modal, Row, Space, Spin, Statistic, Tag, Tooltip, Typography, message,
+  Modal, Popover, Row, Space, Spin, Statistic, Tag, Tooltip, Typography, message,
 } from 'antd'
 import {
   EyeOutlined, HistoryOutlined, LaptopOutlined, StopOutlined, UserOutlined,
@@ -111,6 +111,80 @@ function Sparkline({ history }) {
   )
 }
 
+// ── Episode score breakdown (popover) ────────────────────────────────────────
+
+const fmtMult = (v) => '×' + (v ?? 1).toFixed(2)
+
+function BreakdownRow({ label, value, detail, strong, color }) {
+  return (
+    <div style={{
+      display: 'flex', justifyContent: 'space-between',
+      alignItems: 'baseline', gap: 14, padding: '2px 0',
+    }}>
+      <Text strong={strong} style={{ fontSize: 11, color: color ?? palette.text }}>{label}</Text>
+      <span style={{ display: 'flex', gap: 6, alignItems: 'baseline', whiteSpace: 'nowrap' }}>
+        {detail && <Text type="secondary" style={{ fontSize: 10 }}>{detail}</Text>}
+        <Text strong={strong} style={{ fontSize: 11, color: color ?? palette.text, fontVariantNumeric: 'tabular-nums' }}>
+          {value}
+        </Text>
+      </span>
+    </div>
+  )
+}
+
+/**
+ * Reconstructs EpisodeRiskScore = BaseEpisodeScore × EffectiveMultiplier and shows
+ * each layer. Corroboration / co-occurrence are shown raw → effective (the AI-damping
+ * applied). EffectiveMultiplier (stored) is authoritative, so the aggregate cap is
+ * detected constant-free: corrEff·transEff already exceeding it means it was clamped.
+ */
+export function ScoreBreakdown({ ep }) {
+  const base     = ep.BaseEpisodeScore ?? 0
+  const aiShare  = ep.AIShare ?? 0
+  const damp     = 1 - aiShare
+  const corrRaw  = ep.CorroborationMult ?? 1
+  const transRaw = ep.TacticTransitionMult ?? 1
+  const corrEff  = 1 + (corrRaw - 1) * damp
+  const transEff = 1 + (transRaw - 1) * damp
+  const product  = corrEff * transEff
+  const effMult  = ep.EffectiveMultiplier ?? product
+  const risk     = ep.EpisodeRiskScore ?? base * effMult
+  const capped   = product > effMult + 1e-6
+  const tail     = product ? effMult / product : 1   // variation bonus, or net clamp when capped
+
+  const damped   = aiShare > 0.0005
+  const corrVal  = damped && corrRaw  > 1.0005 ? `${fmtMult(corrRaw)} → ${fmtMult(corrEff)}`   : fmtMult(corrRaw)
+  const transVal = damped && transRaw > 1.0005 ? `${fmtMult(transRaw)} → ${fmtMult(transEff)}` : fmtMult(transRaw)
+
+  return (
+    <div style={{ minWidth: 232, maxWidth: 320 }}>
+      <BreakdownRow label="Base score" value={base.toFixed(1)} detail={`${ep.SceneCount} scene${ep.SceneCount !== 1 ? 's' : ''}`} />
+      <BreakdownRow
+        label="Corroboration"
+        value={corrVal}
+        detail={corrRaw > 1.0005 ? `${ep.FamilyCount} families` : '1 family'}
+      />
+      <BreakdownRow
+        label="Co-occurrence"
+        value={transVal}
+        detail={transRaw > 1.0005 ? (ep.TacticTransitions || 'pairs') : 'none'}
+      />
+      {damped && (
+        <BreakdownRow label="AI damping" value={`${(aiShare * 100).toFixed(0)}%`} detail="AI share of risk → bonuses damped" color={palette.primary} />
+      )}
+      {ep.AdaptiveBehaviorFlag && !capped && (
+        <BreakdownRow label="Variation" value={fmtMult(tail)} detail="adaptive" />
+      )}
+      {capped && (
+        <BreakdownRow label="Aggregate cap" value={`${fmtMult(product)} → ${fmtMult(effMult)}`} detail="clamped" color={palette.amber} />
+      )}
+      <div style={{ borderTop: `1px solid ${palette.border}`, margin: '5px 0' }} />
+      <BreakdownRow label="Effective multiplier" value={fmtMult(effMult)} strong />
+      <BreakdownRow label="Episode risk" value={risk.toFixed(1)} strong color={RISK_COLOR(risk)} />
+    </div>
+  )
+}
+
 // ── Compact episode list ──────────────────────────────────────────────────────
 
 function EpisodeList({ episodes }) {
@@ -132,9 +206,25 @@ function EpisodeList({ episodes }) {
             }}
           >
             <Space wrap size={6}>
-              <Text strong style={{ color: RISK_COLOR(ep.EpisodeRiskScore ?? 0), minWidth: 34 }}>
-                {ep.EpisodeRiskScore?.toFixed(1) ?? '—'}
-              </Text>
+              <Popover
+                content={<ScoreBreakdown ep={ep} />}
+                title="Score breakdown"
+                trigger="hover"
+                mouseEnterDelay={0.3}
+                placement="rightTop"
+              >
+                <Text
+                  strong
+                  style={{
+                    color: RISK_COLOR(ep.EpisodeRiskScore ?? 0),
+                    minWidth: 34,
+                    cursor: 'help',
+                    borderBottom: `1px dotted ${palette.muted}`,
+                  }}
+                >
+                  {ep.EpisodeRiskScore?.toFixed(1) ?? '—'}
+                </Text>
+              </Popover>
               <Text type="secondary" style={{ fontSize: 11 }}>
                 {ep.StartTime?.slice(0, 16).replace('T', ' ')}
               </Text>
