@@ -33,6 +33,7 @@ const WF_COLORS = {
   Operational:          palette.success,
   AIWorkflow:           '#722ed1',
   DeveloperAutomation:  palette.primary,
+  ServiceAutomation:    '#d48806',
 }
 
 function FlagTags({ record }) {

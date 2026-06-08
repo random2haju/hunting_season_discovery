@@ -169,9 +169,9 @@ The `CmdLine` field in Evidence is scanned against three pattern lists. First ma
 
 ## Workflow classification and priority gating
 
-Every scene is classified as `AIWorkflow`, `DeveloperAutomation`, or `Unknown` based on process names, parent processes, and Evidence path patterns (configured under `workflow_classification` in `config.json`).
+Every scene is classified as `AIWorkflow`, `DeveloperAutomation`, `ServiceAutomation`, or `Operational`. AI classification uses (1) the DetectionType for queries that fire only on AI agents as the actor, (2) AI process/parent names and Evidence path patterns; `ServiceAutomation` is driven by service/machine account names. All patterns are configured under `workflow_classification` in `config.json`.
 
-Entities dominated by `AIWorkflow` or `DeveloperAutomation` with fewer than 2 distinct MITRE tactics are excluded from Priority Cases and routed to the **AI Dev Outliers** sheet. This prevents legitimate AI developer tool activity (Claude Code, Cursor, bash→bash chains) from dominating the priority list.
+Entities dominated by an automation class (`AIWorkflow` / `DeveloperAutomation` / `ServiceAutomation`) with fewer than 2 distinct MITRE tactics are excluded from Priority Cases and routed to the **AI Dev Outliers** sheet. This prevents legitimate AI/developer/service-account activity (Claude Code, Cursor, scheduled jobs) from dominating the priority list. The gate has a severity escape hatch: an entity is retained anyway when its `TotalRisk` clears `priority_score_override` or it carries a `non_discountable_detection_types` detection (e.g. MCP Config Tampered), so a single critical hit on an automation host is never hidden.
 
 ---
 
@@ -227,7 +227,7 @@ All scoring parameters live in `config.json`. Key sections:
 - `adaptive_behavior` — variation cluster threshold and score bonus
 - `attack_chain_hygiene` — account exclusion lists and fan-out threshold
 - `season_diminishing_returns` — log-based rank weighting and family decay
-- `workflow_classification` — AI/Dev workflow detection patterns and priority gate threshold
+- `workflow_classification` — AI/Dev/Service workflow detection patterns, priority gate threshold, and severity escape hatch
 - `history` — history store path, baseline thresholds, and anomaly flag parameters
 
 See `CLAUDE.md` for a full key-by-key reference.

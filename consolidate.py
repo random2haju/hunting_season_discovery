@@ -159,53 +159,99 @@ def compute_context_multiplier(tier: str, context: str, cmdline_score: float, cf
     return max(round(tier_mult * dev_discount * cmdline_score, 3), 0.05)
 
 
-def classify_workflow_class(evidence_str: str, parsed_ev: dict, execution_context: str, cfg: dict) -> tuple:
+def _proc_stem(name: str) -> str:
+    """Strip .exe/.cmd/.bat/.sh extension and lowercase so 'bash' matches 'bash.exe'."""
+    n = (name or "").lower()
+    for ext in (".exe", ".cmd", ".bat", ".sh"):
+        if n.endswith(ext):
+            return n[: -len(ext)]
+    return n
+
+
+def is_service_account(account_name: str, wf_cfg: dict) -> bool:
+    """
+    True when the account looks like a non-interactive service / machine account.
+    Matches configured exact names, prefixes (svc-, sa-), and suffixes ($ machine accounts).
+    """
+    if not account_name:
+        return False
+    a = str(account_name).strip().lower()
+    if not a:
+        return False
+    pats = wf_cfg.get("service_account_patterns", {})
+    if a in {x.lower() for x in pats.get("exact", [])}:
+        return True
+    if any(a.endswith(s.lower()) for s in pats.get("suffixes", []) if s):
+        return True
+    if any(a.startswith(p.lower()) for p in pats.get("prefixes", []) if p):
+        return True
+    return False
+
+
+def classify_workflow_class(
+    evidence_str: str, parsed_ev: dict, execution_context: str,
+    detection_type: str, account_name: str, cfg: dict
+) -> tuple:
     """
     Classify a scene's workflow context for eligibility gating and analyst routing.
 
     Returns (workflow_class, reasons_str):
-      workflow_class: "AIWorkflow" | "DeveloperAutomation" | "Unknown"
+      workflow_class: "AIWorkflow" | "DeveloperAutomation" | "ServiceAutomation" | "Operational"
       reasons_str:    human-readable explanation included in the AI/Dev Outliers sheet
 
-    AIWorkflow fires when the evidence string, process name, or parent process name
-    contains known AI agent indicators (e.g. /.claude/ paths, claude.exe).
-    DeveloperAutomation fires when the parent is a known IDE/terminal but no AI
-    indicators are present.
+    Classification precedence (strongest signal first):
+      1. AIWorkflow by DetectionType — the four detections whose KQL filters on
+         `InitiatingProcessFileName in~ (ai_agent_processes)` fire only when an AI agent
+         is the actor, so they are AI-actor by construction regardless of Evidence layout.
+         (Detections that target *non-AI* processes touching AI assets — e.g. Browser AI
+         Token Theft, AI API Key Read — are deliberately excluded and keep full score.)
+      2. AIWorkflow by indicator — AI process name (standard `Process:` actor key), AI
+         parent name (`Parent:`/`JupyterParent:`), an AI process->parent pair, or an AI
+         path substring (.claude, mcp.json, etc.) anywhere in Evidence.
+      3. DeveloperAutomation — parent is a known IDE/terminal (no AI indicator present).
+      4. ServiceAutomation — non-interactive service / machine account.
+      5. Operational — none of the above.
+
+    Note: AI actor-process matching is intentionally limited to the canonical `process`
+    key. Queries that record the actor under `Writer:`/`Reader:`/`ReadBy:` are the
+    non-AI-actor detections above, so promoting those keys would wrongly discount real
+    AI-driven credential/token theft.
     """
     wf_cfg           = cfg.get("workflow_classification", {})
     ai_path_patterns = wf_cfg.get("ai_path_patterns", ["/.claude/", "\\.claude\\"])
 
-    def _stem(name: str) -> str:
-        """Strip .exe/.cmd/.bat extension for comparison so 'bash' matches 'bash.exe'."""
-        n = name.lower()
-        for ext in (".exe", ".cmd", ".bat", ".sh"):
-            if n.endswith(ext):
-                return n[: -len(ext)]
-        return n
+    # 1. Detection-type-based AI-actor classification (robust to Evidence formatting)
+    ai_actor_types = set(wf_cfg.get("ai_actor_detection_types", []))
+    if detection_type in ai_actor_types:
+        return "AIWorkflow", f"detection '{detection_type}' fires only on AI agents"
 
-    ai_process_stems = {_stem(n) for n in wf_cfg.get("ai_process_names", ["claude", "claude.exe", "claude-code"])}
-    ai_parent_stems  = {_stem(n) for n in wf_cfg.get("ai_parent_names",  ["claude.exe", "claude-code", "claude"])}
+    ai_process_stems = {_proc_stem(n) for n in wf_cfg.get("ai_process_names", ["claude", "claude-code"])}
+    ai_parent_stems  = {_proc_stem(n) for n in wf_cfg.get("ai_parent_names",  ["claude", "claude-code"])}
 
     ai_pairs = [
-        (_stem(pair[0]), _stem(pair[1]))
-        for pair in wf_cfg.get("ai_process_parent_pairs", [["bash", "bash"]])
+        (_proc_stem(pair[0]), _proc_stem(pair[1]))
+        for pair in wf_cfg.get("ai_process_parent_pairs", [])
         if len(pair) == 2
     ]
 
     reasons = []
     process = parsed_ev.get("process", "").lower()
-    parent  = parsed_ev.get("parent",  "").lower()
-    process_stem = _stem(process)
-    parent_stem  = _stem(parent)
+    process_stem = _proc_stem(process)
+    # Parent may be labelled Parent: or JupyterParent: depending on the query
+    parents = [parsed_ev.get(k, "").lower() for k in ("parent", "jupyterparent")]
+    parents = [p for p in parents if p]
+    parent_stems = {_proc_stem(p) for p in parents}
 
     if process_stem in ai_process_stems:
         reasons.append(f"process={process}")
-    if parent_stem in ai_parent_stems:
-        reasons.append(f"parent={parent}")
+    for p in parents:
+        if _proc_stem(p) in ai_parent_stems:
+            reasons.append(f"parent={p}")
+            break
 
     for proc_s, par_s in ai_pairs:
-        if process_stem == proc_s and parent_stem == par_s:
-            reasons.append(f"process-parent pair {process}->{parent}")
+        if process_stem == proc_s and par_s in parent_stems:
+            reasons.append(f"process-parent pair {process}->{par_s}")
             break
 
     ev_lower = (evidence_str or "").lower()
@@ -220,7 +266,10 @@ def classify_workflow_class(evidence_str: str, parsed_ev: dict, execution_contex
     if execution_context == "DeveloperTooling":
         return "DeveloperAutomation", "parent is a known developer tool"
 
-    return "Unknown", ""
+    if is_service_account(account_name, wf_cfg):
+        return "ServiceAutomation", f"service/machine account ({account_name})"
+
+    return "Operational", ""
 
 
 # ---------------------------------------------------------------------------
@@ -340,8 +389,11 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
     # Produces WorkflowClass (AIWorkflow / DeveloperAutomation / Unknown) and a
     # human-readable WorkflowReasons string used in analyst-facing output sheets.
     wf_results = [
-        classify_workflow_class(ev, pe, ctx, cfg)
-        for ev, pe, ctx in zip(scenes["Evidence"], parsed_evs, scenes["ExecutionContext"])
+        classify_workflow_class(ev, pe, ctx, dt, acct, cfg)
+        for ev, pe, ctx, dt, acct in zip(
+            scenes["Evidence"], parsed_evs, scenes["ExecutionContext"],
+            scenes["DetectionType"], scenes["AccountName"]
+        )
     ]
     scenes["WorkflowClass"]   = [r[0] for r in wf_results]
     scenes["WorkflowReasons"] = [r[1] for r in wf_results]
@@ -910,16 +962,26 @@ def enrich_seasons_with_workflow(
 
     New columns:
       PrimaryWorkflowClass  — dominant workflow class across the entity's scenes
-                              ("AIWorkflow" | "DeveloperAutomation" | "Operational")
+                              ("AIWorkflow" | "DeveloperAutomation" | "ServiceAutomation" | "Operational")
       AIWorkflowScenePct    — % of scenes classified as AIWorkflow
-      EligibleForPriority   — False when the entity is AI/Dev-dominated with < N tactics
+      EligibleForPriority   — False when the entity is automation-dominated with < N tactics
       ExclusionReason       — human-readable explanation for ineligible entities
 
-    Eligibility gate: entities whose scenes are dominated by AIWorkflow or DeveloperAutomation
-    AND have fewer than workflow_classification.priority_min_tactics_for_ai_dev distinct MITRE
-    tactics are excluded from Priority Investigation Cases and routed to AI/Dev Outliers.
+    Eligibility gate: entities whose scenes are dominated by an automation class
+    (AIWorkflow / DeveloperAutomation / ServiceAutomation) AND have fewer than
+    workflow_classification.priority_min_tactics_for_ai_dev distinct MITRE tactics are
+    excluded from Priority Investigation Cases and routed to AI/Dev Outliers.
+
+    Severity override: a low-tactic automation entity is retained in Priority Cases
+    anyway when its TotalRisk reaches `priority_score_override`, or when any of its
+    scenes carries a `non_discountable_detection_types` detection — so a single
+    high-severity hit (e.g. MCP Config Tampered) on an AI host is never silently hidden.
     """
-    min_tactics = int(cfg.get("workflow_classification", {}).get("priority_min_tactics_for_ai_dev", 2))
+    wf_cfg        = cfg.get("workflow_classification", {})
+    min_tactics   = int(wf_cfg.get("priority_min_tactics_for_ai_dev", 2))
+    score_override = float(wf_cfg.get("priority_score_override", 0) or 0)  # 0 disables
+    non_disc      = set(wf_cfg.get("non_discountable_detection_types", []))
+    AUTOMATED     = ("AIWorkflow", "DeveloperAutomation", "ServiceAutomation")
 
     seasons = seasons.copy()
     seasons["PrimaryWorkflowClass"] = "Operational"
@@ -929,6 +991,12 @@ def enrich_seasons_with_workflow(
 
     if "WorkflowClass" not in scenes.columns:
         return seasons
+
+    # Entities with at least one non-discountable high-severity detection
+    crit_entities = set()
+    if non_disc and "DetectionType" in scenes.columns:
+        crit_mask = scenes["DetectionType"].isin(non_disc)
+        crit_entities = set(scenes.loc[crit_mask, entity_col].unique())
 
     wf_counts = (
         scenes.groupby([entity_col, "WorkflowClass"])
@@ -946,29 +1014,37 @@ def enrich_seasons_with_workflow(
             continue
 
         ai_count  = int(counts.get("AIWorkflow", 0))
-        dev_count = int(counts.get("DeveloperAutomation", 0))
-        other     = total - ai_count - dev_count
+        # Automated-class counts, evaluated by true plurality (argmax), not first-match
+        automated_counts = {cls: int(counts.get(cls, 0)) for cls in AUTOMATED}
+        operational = total - sum(automated_counts.values())
 
-        ai_pct = round(ai_count / total * 100, 1)
-        seasons.at[idx, "AIWorkflowScenePct"] = ai_pct
+        seasons.at[idx, "AIWorkflowScenePct"] = round(ai_count / total * 100, 1)
 
-        # Dominant class: whichever automated class outnumbers all non-automated scenes
-        if ai_count > other:
-            primary = "AIWorkflow"
-        elif dev_count > other:
-            primary = "DeveloperAutomation"
-        else:
-            primary = "Operational"
+        # Dominant class: the largest automation class, but only if it outnumbers
+        # plain operational scenes; ties resolve in AUTOMATED order (AI > Dev > Service).
+        best_class = max(AUTOMATED, key=lambda c: automated_counts[c])
+        best_count = automated_counts[best_class]
+        primary = best_class if best_count > operational else "Operational"
         seasons.at[idx, "PrimaryWorkflowClass"] = primary
 
-        # Hard eligibility gate
+        # Hard eligibility gate, with severity escape hatch
         tactics = int(row["UniqueTactics"])
-        if primary in ("AIWorkflow", "DeveloperAutomation") and tactics < min_tactics:
-            seasons.at[idx, "EligibleForPriority"] = False
-            seasons.at[idx, "ExclusionReason"] = (
-                f"{primary} entity with {tactics} distinct MITRE tactic(s); "
-                f"minimum {min_tactics} required for priority ranking"
-            )
+        if primary in AUTOMATED and tactics < min_tactics:
+            total_risk = float(row.get("TotalRisk", 0) or 0)
+            high_score = score_override > 0 and total_risk >= score_override
+            has_crit   = entity in crit_entities
+            if high_score or has_crit:
+                # Retained despite low tactic count — record why for analyst transparency
+                why = "high TotalRisk" if high_score else "non-discountable detection"
+                seasons.at[idx, "ExclusionReason"] = (
+                    f"{primary} with {tactics} tactic(s) but retained in Priority ({why})"
+                )
+            else:
+                seasons.at[idx, "EligibleForPriority"] = False
+                seasons.at[idx, "ExclusionReason"] = (
+                    f"{primary} entity with {tactics} distinct MITRE tactic(s); "
+                    f"minimum {min_tactics} required for priority ranking"
+                )
 
     return seasons
 

@@ -221,11 +221,41 @@
   },
 
   "workflow_classification": {
-    "ai_path_patterns":  ["/.claude/", "\\.claude\\"],
-    "ai_process_names":  ["claude", "claude.exe", "claude-code"],
-    "ai_parent_names":   ["claude.exe", "claude-code", "claude"],
-    "ai_process_parent_pairs": [["bash", "bash"]],
-    "priority_min_tactics_for_ai_dev": 2
+    "ai_path_patterns":  [
+      "/.claude/", "\\.claude\\", "/.cursor/", "\\.cursor\\",
+      "/.continue/", "\\.continue\\", "/.aider", "\\.aider",
+      "/.ollama/", "\\.ollama\\", "/.codeium/", "\\.codeium\\",
+      "claude_desktop_config.json", "mcp.json"
+    ],
+    "ai_process_names":  [
+      "claude", "claude-code", "cursor", "windsurf", "copilot",
+      "github-copilot", "aider", "continue", "ollama", "lmstudio",
+      "lm-studio", "jan", "gpt4all", "codeium", "cody", "tabby"
+    ],
+    "ai_parent_names":   [
+      "claude", "claude-code", "cursor", "windsurf", "copilot",
+      "aider", "continue", "ollama"
+    ],
+    "ai_process_parent_pairs": [],
+    "ai_actor_detection_types": [
+      "Unexpected Agent Process Spawn",
+      "Agent IPC Abuse",
+      "Agent Persistence Mechanism",
+      "MCP Server Execution"
+    ],
+    "service_account_patterns": {
+      "suffixes": ["$"],
+      "prefixes": ["svc-", "svc_", "svc.", "service-", "sa-", "sa_","srv"],
+      "exact":    ["system", "network service", "local service", "anonymous logon",
+                   "iusr", "iwam", "aspnet", "defaultaccount"]
+    },
+    "priority_min_tactics_for_ai_dev": 2,
+    "priority_score_override": 25.0,
+    "non_discountable_detection_types": [
+      "MCP Config Tampered", "Browser AI Token Theft", "AI Model Weight Exfiltration",
+      "AI API Key Read", "Mimikatz Execution", "LSASS Memory Dump",
+      "Shadow Copy Deleted", "Security Service Disabled", "Agent Persistence Mechanism"
+    ]
   },
 
   "suppression": {

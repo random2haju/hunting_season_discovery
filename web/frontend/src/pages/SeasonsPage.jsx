@@ -56,7 +56,7 @@ function makeColumns(entityCol) {
       render: (v) => <Tooltip title={v}><Text style={{ fontSize: 11 }}>{v}</Text></Tooltip>,
     },
     {
-      title: <ColHeader label="Workflow" tip="Primary workflow classification: Operational (standard endpoint), AIWorkflow (AI agent activity), DeveloperAutomation (IDE/dev tooling). AI/Dev entities need ≥2 tactics to reach Priority Cases." />,
+      title: <ColHeader label="Workflow" tip="Primary workflow classification: Operational (standard endpoint), AIWorkflow (AI agent activity), DeveloperAutomation (IDE/dev tooling), ServiceAutomation (service/machine account). Automation entities need ≥2 tactics to reach Priority Cases, unless they have a high TotalRisk or a non-discountable detection." />,
       dataIndex: 'PrimaryWorkflowClass',
       key: 'PrimaryWorkflowClass',
       width: 140,
@@ -64,6 +64,7 @@ function makeColumns(entityCol) {
         { text: 'Operational', value: 'Operational' },
         { text: 'AIWorkflow', value: 'AIWorkflow' },
         { text: 'DeveloperAutomation', value: 'DeveloperAutomation' },
+        { text: 'ServiceAutomation', value: 'ServiceAutomation' },
       ],
       onFilter: (v, r) => r.PrimaryWorkflowClass === v,
     },

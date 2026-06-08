@@ -26,7 +26,7 @@ const FIELDS = [
 
 const CAT_VALUES = {
   EntityType:           ['Device', 'User'],
-  PrimaryWorkflowClass: ['AIWorkflow', 'DeveloperAutomation', 'Operational'],
+  PrimaryWorkflowClass: ['AIWorkflow', 'DeveloperAutomation', 'ServiceAutomation', 'Operational'],
 }
 
 const NUMERIC_OPS = [

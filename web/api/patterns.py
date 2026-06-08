@@ -26,7 +26,7 @@ _NUMERIC      = {"UniqueTactics", "TotalRisk", "AIWorkflowScenePct"}
 _VALID_OPS    = {"=", "<", "<=", ">", ">="}
 _CAT_VALUES   = {
     "EntityType":           {"Device", "User"},
-    "PrimaryWorkflowClass": {"AIWorkflow", "DeveloperAutomation", "Operational"},
+    "PrimaryWorkflowClass": {"AIWorkflow", "DeveloperAutomation", "ServiceAutomation", "Operational"},
 }
 
 

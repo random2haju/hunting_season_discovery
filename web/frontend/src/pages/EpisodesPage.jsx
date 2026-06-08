@@ -181,6 +181,7 @@ function PrevalenceBadge({ count }) {
 const WORKFLOW_COLORS = {
   AIWorkflow:           'purple',
   DeveloperAutomation:  'blue',
+  ServiceAutomation:    'gold',
   Operational:          'default',
 }
 
