@@ -717,13 +717,17 @@ def build_episodes(scenes: pd.DataFrame, entity_col: str, tactic_weights: dict, 
 
         # Corroboration bonus: reward episodes with multiple distinct behavior families.
         # Counts only families that actually contributed score (> 0) — a family whose
-        # scenes were all suppressed upstream is not real corroboration.  corr_raw is the
-        # structural bonus the episode earned; it is later damped by ai_share (see below).
+        # scenes were all suppressed upstream is not real corroboration.  Families are
+        # first collapsed into corroboration_groups so that variants of one behavior
+        # (e.g. Lolbin/Jupyter/ShadowAI all → "Execution") count once, not as a kill
+        # chain.  corr_raw is the structural bonus; it is later damped by ai_share.
         scoring_fams = {f for f, s in family_scores.items() if s > 0}
-        n_fams = len(scoring_fams)
+        n_fams = len(scoring_fams)                                     # real families → FamilyCount
+        corr_groups_map = cfg.get("corroboration_groups", {})
+        n_groups = len({corr_groups_map.get(f, f) for f in scoring_fams})
         unique_fams = set(g["BehaviorFamily"].dropna()) - {"Unknown"}  # all present, for display
-        if n_fams >= min_fam:
-            corr_raw = min(bonus_per ** (n_fams - min_fam + 1), max_bonus)
+        if n_groups >= min_fam:
+            corr_raw = min(bonus_per ** (n_groups - min_fam + 1), max_bonus)
         else:
             corr_raw = 1.0
 

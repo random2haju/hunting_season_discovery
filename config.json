@@ -121,8 +121,8 @@
     "neutral":     1.0
   },
   "behavior_families": {
-    "LOLBin Execution":          "ShellExecution",
-    "Discovery Command":         "NetworkRecon",
+    "LOLBin Execution":          "LolbinExecution",
+    "Discovery Command":         "Discovery",
     "Network Port Scan":         "NetworkRecon",
     "LSASS Access":              "CredentialDump",
     "LSASS Memory Dump":         "CredentialDump",
@@ -142,8 +142,8 @@
     "AI Agent Memory Write":     "Persistence",
     "AI Data Exfiltration":      "DataExfiltration",
     "AI API Key Read":           "AIKeyAccess",
-    "Jupyter Shell Execution":   "ShellExecution",
-    "Shadow AI Tooling":         "ShellExecution",
+    "Jupyter Shell Execution":   "JupyterExecution",
+    "Shadow AI Tooling":         "ShadowAI",
     "MCP Server Installed":      "MCPAbuse",
     "MCP Server Execution":      "MCPAbuse",
     "MCP Config Tampered":       "MCPAbuse",
@@ -157,7 +157,10 @@
   },
   "episode_family_cap": 3,
   "episode_family_cap_multipliers": {
-    "ShellExecution":    0.15,
+    "LolbinExecution":   0.15,
+    "JupyterExecution":  0.2,
+    "ShadowAI":          0.3,
+    "Discovery":         0.5,
     "NetworkRecon":      0.3,
     "Persistence":       0.7,
     "LateralMovement":   1.0,
@@ -176,6 +179,11 @@
     "min_families_for_bonus":      2,
     "bonus_per_additional_family": 1.4,
     "max_bonus_multiplier":        5.0
+  },
+  "corroboration_groups": {
+    "LolbinExecution":  "Execution",
+    "JupyterExecution": "Execution",
+    "ShadowAI":         "Execution"
   },
   "max_episode_multiplier": 6.0,
   "season_diminishing_returns": {

@@ -162,7 +162,11 @@ export function ScoreBreakdown({ ep }) {
       <BreakdownRow
         label="Corroboration"
         value={corrVal}
-        detail={corrRaw > 1.0005 ? `${ep.FamilyCount} families` : '1 family'}
+        detail={
+          corrRaw > 1.0005      ? `${ep.FamilyCount} families`
+          : (ep.FamilyCount ?? 0) >= 2 ? `${ep.FamilyCount} families · 1 group`
+          : '1 family'
+        }
       />
       <BreakdownRow
         label="Co-occurrence"
