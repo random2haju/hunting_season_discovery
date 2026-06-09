@@ -9,7 +9,13 @@
     "Persistence":         7,
     "Discovery":           3,
     "Exfiltration":        9,
-    "Collection":          6
+    "Collection":          6,
+    "Malware":             5,
+    "SuspiciousActivity":  2,
+    "UnwantedSoftware":    1,
+    "InitialAccess":       4,
+    "Exploit":             6,
+    "Ransomware":          7
   },
   "tactic_transitions": {
     "pairs": [
@@ -84,7 +90,7 @@
   "prevalence_suppression_multiplier": 0.2,
   "prevalence_boost_multiplier": 1.5,
   "max_scenes_per_pattern_per_device": 3,
-  "use_evidence_clustering": false,
+  "use_evidence_clustering": true,
   "evidence_clustering_sim_threshold": 0.5,
   "evidence_normalizations": [
     {"pattern": "(?i)(c:\\\\users\\\\)[^\\\\]+(\\\\)", "replacement": "\\1<user>\\2"},
@@ -111,7 +117,7 @@
   "dev_context_discount": 0.25,
   "cmdline_risk_patterns": {
     "high_risk":   ["base64 -d", "base64 -D", "-EncodedCommand", "IEX", "Invoke-Expression", "certutil -decode", "certutil -urlcache", "DownloadString", "DownloadFile", "mshta http"],
-    "medium_risk": ["whoami", "net user", "net group", "ipconfig /all", "systeminfo", "nltest", "net view", "curl.*| bash", "wget.*| sh", "nmap", "masscan"],
+    "medium_risk": ["whoami", "net user", "net group", "ipconfig /all", "systeminfo", "nltest", "net view", "curl.*\\|\\s*bash", "wget.*\\|\\s*sh", "nmap", "masscan"],
     "low_risk":    ["git ", "npm ", "pip ", "pytest", "cargo ", "make ", "cmake ", "mvn ", "gradle ", "yarn ", "pnpm ", "python setup.py"]
   },
   "cmdline_risk_multipliers": {
@@ -200,7 +206,8 @@
     ],
     "min_device_season_score": 0,
     "min_unique_tactics": 0,
-    "fan_out_threshold": 3
+    "fan_out_threshold": 3,
+    "strip_account_domain": true
   },
 
   "adaptive_behavior": {
@@ -230,11 +237,11 @@
     "ai_process_names":  [
       "claude", "claude-code", "cursor", "windsurf", "copilot",
       "github-copilot", "aider", "continue", "ollama", "lmstudio",
-      "lm-studio", "jan", "gpt4all", "codeium", "cody", "tabby"
+      "lm-studio", "jan", "gpt4all", "codeium", "cody", "tabby","hermes"
     ],
     "ai_parent_names":   [
       "claude", "claude-code", "cursor", "windsurf", "copilot",
-      "aider", "continue", "ollama"
+      "aider", "continue", "ollama", "hermes"
     ],
     "ai_process_parent_pairs": [],
     "ai_actor_detection_types": [

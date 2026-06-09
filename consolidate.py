@@ -119,6 +119,27 @@ def classify_execution_context(parsed_ev: dict, dev_parents_lower: list) -> str:
     return "Unknown"
 
 
+# A pattern is treated as a regex when it contains any regex metacharacter — not
+# just a literal ".*". This lets analysts use \b, character classes, alternation,
+# etc.; previously anything without ".*" was silently taken as a plain substring,
+# so e.g. "curl.*\|\s*bash" worked but "\bnet\b" did not.
+_REGEX_METACHARS = re.compile(r"[.*+?\[\]{}()|^$\\]")
+
+
+def _pattern_matches(pattern: str, text: str, text_lower: str) -> bool:
+    """Case-insensitive match: regex if the pattern looks like one, else substring.
+
+    A malformed regex falls back to a literal substring match so one bad config
+    entry degrades gracefully instead of crashing the whole run.
+    """
+    if _REGEX_METACHARS.search(pattern):
+        try:
+            return re.search(pattern, text, flags=re.IGNORECASE) is not None
+        except re.error:
+            return pattern.lower() in text_lower
+    return pattern.lower() in text_lower
+
+
 def score_commandline_shape(parsed_ev: dict, cfg: dict) -> float:
     """
     Score the CmdLine field from parsed Evidence for suspicious vs benign patterns.
@@ -133,10 +154,7 @@ def score_commandline_shape(parsed_ev: dict, cfg: dict) -> float:
     cmdline_lower = cmdline.lower()
     for tier in ("high_risk", "medium_risk", "low_risk"):
         for pattern in risk_patterns.get(tier, []):
-            if ".*" in pattern:
-                if re.search(pattern, cmdline, flags=re.IGNORECASE):
-                    return risk_multipliers.get(tier, 1.0)
-            elif pattern.lower() in cmdline_lower:
+            if _pattern_matches(pattern, cmdline, cmdline_lower):
                 return risk_multipliers.get(tier, 1.0)
     return risk_multipliers.get("neutral", 1.0)
 
@@ -306,10 +324,14 @@ def load_scenes(data_dir: str, tactic_weights: dict, cfg: dict) -> pd.DataFrame:
             print(f"  [WARN] Skipping {fname} — missing columns: {missing}")
             continue
 
-        # Parse tactic from filename prefix (e.g. execution_lolbin.csv -> Execution)
+        # Fallback tactic from filename prefix (e.g. execution_lolbin.csv -> Execution):
+        # TacticCategory is a required column so it always exists, but individual KQL
+        # exports occasionally leave a cell blank. Fill those from the file prefix
+        # rather than letting them score as the catch-all 1 with a blank tactic name.
         tactic_prefix = fname.split("_")[0].capitalize()
-        # Normalise TacticCategory in data to match config keys
-        # The KQL writes it as e.g. "Execution" — use the file prefix as fallback
+        blank_tactic = df["TacticCategory"].isna() | (df["TacticCategory"].astype(str).str.strip() == "")
+        if blank_tactic.any():
+            df.loc[blank_tactic, "TacticCategory"] = tactic_prefix
         df["SourceFile"] = fname
 
         # Warn if tactic not in config
@@ -895,14 +917,19 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
     decay_after  = dr_cfg.get("same_family_decay_after", 1)
     decay_factor = dr_cfg.get("same_family_decay_factor", 0.5)
 
-    # True unique tactic count = union of all TacticCategory values seen in scenes per entity,
-    # not the max TacticCount from a single episode (which under-counts multi-episode seasons).
-    entity_tactic_counts = scenes.groupby(entity_col)["TacticCategory"].nunique()
+    # True unique tactic count = union of all TacticCategory values seen in scenes per
+    # entity, not the max TacticCount from a single episode (which under-counts
+    # multi-episode seasons). Only scenes that actually contributed score (>0) count:
+    # scenes zeroed by the scene-cap or a full AI discount must not inflate the tactic
+    # breadth that feeds the Priority eligibility gate, or a fully-discounted entity
+    # could clear the min-tactics bar while sitting at TotalRisk≈0.
+    scored = scenes[scenes["ScoreContribution"] > 0]
+    entity_tactic_counts = scored.groupby(entity_col)["TacticCategory"].nunique()
 
-    # TacticSet: sorted comma-joined string of unique tactics — used for cross-run tactic
-    # adaptation detection (IsAdaptingTactics) and analyst readability.
+    # TacticSet: sorted comma-joined string of unique (scored) tactics — used for
+    # cross-run tactic adaptation detection (IsAdaptingTactics) and analyst readability.
     entity_tactic_sets = (
-        scenes.groupby(entity_col)["TacticCategory"]
+        scored.groupby(entity_col)["TacticCategory"]
         .apply(lambda x: ", ".join(sorted(x.dropna().unique())))
     )
 
@@ -1147,19 +1174,30 @@ def build_attack_chains(device_seasons: pd.DataFrame, scenes: pd.DataFrame, cfg:
     excluded_accounts = {a.lower() for a in chain_cfg.get("excluded_accounts", [])}
     min_chain_score   = float(chain_cfg.get("min_device_season_score", 0))
     min_chain_tactics = int(chain_cfg.get("min_unique_tactics", 0))
+    strip_domain      = chain_cfg.get("strip_account_domain", True)
 
     # Work on a filtered copy so we don't mutate the scenes DataFrame used elsewhere
     chain_scenes = scenes[
         scenes["AccountName"].notna() & scenes["AccountName"].ne("")
     ].copy()
+    # Coerce to str so the .str accessors below are safe on mixed-dtype columns.
+    chain_scenes["AccountName"] = chain_scenes["AccountName"].astype(str)
+
+    # Normalized account key for grouping. Windows account names are case-insensitive
+    # and may carry a DOMAIN\ prefix, so "CONTOSO\Alice", "alice", and "ALICE" must link
+    # as one pivot — otherwise the lateral-movement linkage this function exists to find
+    # fragments into separate accounts. We group/exclude on AccountKey but keep the
+    # original casing for display.
+    acct_key = chain_scenes["AccountName"].str.strip()
+    if strip_domain:
+        acct_key = acct_key.str.replace(r"^[^\\]+\\", "", regex=True)
+    chain_scenes["AccountKey"] = acct_key.str.lower()
 
     if exclude_machine:
-        chain_scenes = chain_scenes[~chain_scenes["AccountName"].str.endswith("$")]
+        chain_scenes = chain_scenes[~chain_scenes["AccountKey"].str.endswith("$")]
 
     if excluded_accounts:
-        chain_scenes = chain_scenes[
-            ~chain_scenes["AccountName"].str.lower().isin(excluded_accounts)
-        ]
+        chain_scenes = chain_scenes[~chain_scenes["AccountKey"].isin(excluded_accounts)]
 
     # Restrict to devices that meet the minimum signal thresholds (if configured)
     if min_chain_score > 0 or min_chain_tactics > 0:
@@ -1169,12 +1207,19 @@ def build_attack_chains(device_seasons: pd.DataFrame, scenes: pd.DataFrame, cfg:
         ]["DeviceName"]
         chain_scenes = chain_scenes[chain_scenes["DeviceName"].isin(eligible)]
 
-    # Build map: account -> set of devices
+    # Build map: account_key -> set of devices, with a representative original-cased
+    # AccountName (the most common spelling) carried alongside for display and for
+    # matching back to case-sensitive User Seasons rows downstream.
     account_devices = (
-        chain_scenes.groupby("AccountName")["DeviceName"]
+        chain_scenes.groupby("AccountKey")["DeviceName"]
         .apply(lambda x: set(x.tolist()))
         .reset_index()
     )
+    display_names = (
+        chain_scenes.groupby("AccountKey")["AccountName"]
+        .agg(lambda s: s.mode().iat[0] if not s.mode().empty else s.iat[0])
+    )
+    account_devices["AccountName"] = account_devices["AccountKey"].map(display_names)
     # Only accounts that appear on more than one device
     account_devices = account_devices[account_devices["DeviceName"].apply(len) > 1]
 
@@ -1255,11 +1300,14 @@ def build_attack_chains(device_seasons: pd.DataFrame, scenes: pd.DataFrame, cfg:
 # Historical score persistence
 # ---------------------------------------------------------------------------
 
+# NOTE: HasMDEAlert is intentionally absent — it is a legacy column from before the
+# AI-focused pivot and carried no real data (always 0). The physical DB column is kept
+# (with DEFAULT 0) for backward compatibility, but the script no longer writes it.
 _HISTORY_COLS = [
     "RunId", "RunTimestamp", "RunTimestampEpoch", "OutputVersion",
     "EntityType", "EntityName", "SeasonScore", "HistoricalPriority", "EpisodeCount",
     "SceneCount", "UniqueTactics", "BehaviorFamilyCount", "TopBehaviorFamily",
-    "HasMDEAlert", "CrossDeviceLink", "TopEpisodeScore", "TopTactic",
+    "CrossDeviceLink", "TopEpisodeScore", "TopTactic",
     "TacticSet",
 ]
 
@@ -1295,7 +1343,15 @@ def load_pattern_suppressions(cfg: dict) -> list:
 
 
 def _evaluate_pattern(row: "pd.Series", entity_type: str, pattern: dict) -> bool:
-    """Return True if the season row matches all conditions (AND logic)."""
+    """Return True if the season row matches all conditions (AND logic).
+
+    Numeric vs string comparison is decided per-condition by whether both the row
+    value and the configured value parse as floats — not by a hardcoded field
+    allowlist. This lets ordering operators (<, <=, >, >=) work on *any* numeric
+    column the dashboard exposes (EpisodeCount, TotalScenes, MaxEpisodeRisk,
+    RiskPercentile, …), not just UniqueTactics / TotalRisk / AIWorkflowScenePct.
+    Non-numeric values support only equality (=) and inequality (!=).
+    """
     for cond in pattern.get("conditions", []):
         field = cond["field"]
         op    = cond["op"]
@@ -1308,19 +1364,27 @@ def _evaluate_pattern(row: "pd.Series", entity_type: str, pattern: dict) -> bool
             if row_val is None or (hasattr(row_val, "__float__") and row_val != row_val):
                 return False
 
+        # Numeric comparison when both sides parse as floats; otherwise string compare.
         try:
-            if field in ("UniqueTactics", "TotalRisk", "AIWorkflowScenePct"):
-                rv, cv = float(row_val), float(value)
-                if op == "="  and not (rv == cv): return False
-                if op == "<"  and not (rv <  cv): return False
-                if op == "<=" and not (rv <= cv): return False
-                if op == ">"  and not (rv >  cv): return False
-                if op == ">=" and not (rv >= cv): return False
-            else:
-                if str(row_val) != str(value):
-                    return False
+            rv, cv = float(row_val), float(value)
+            numeric = True
         except (ValueError, TypeError):
-            return False
+            numeric = False
+
+        if numeric:
+            if op in ("=", "==") and not (rv == cv): return False
+            if op == "!="        and not (rv != cv): return False
+            if op == "<"         and not (rv <  cv): return False
+            if op == "<="        and not (rv <= cv): return False
+            if op == ">"         and not (rv >  cv): return False
+            if op == ">="        and not (rv >= cv): return False
+        else:
+            # Ordering operators are undefined for non-numeric values; treat any
+            # non-"!=" op as equality (matches the prior behaviour for string fields).
+            if op == "!=":
+                if str(row_val) == str(value): return False
+            elif str(row_val) != str(value):
+                return False
     return True
 
 
@@ -1442,9 +1506,6 @@ def _build_history_row(
     behavior_family_count = len(family_counts)
     top_behavior_family = family_counts.most_common(1)[0][0] if family_counts else ""
 
-    ent_scenes = scenes[scenes[entity_col] == entity_name]
-    has_mde_alert = 0
-
     # CrossDeviceLink
     cross_device_link = 0
     if not attack_chains.empty:
@@ -1481,7 +1542,6 @@ def _build_history_row(
         "UniqueTactics":       int(row["UniqueTactics"]),
         "BehaviorFamilyCount": behavior_family_count,
         "TopBehaviorFamily":   top_behavior_family,
-        "HasMDEAlert":         has_mde_alert,
         "CrossDeviceLink":     cross_device_link,
         "TopEpisodeScore":     float(row["MaxEpisodeRisk"]),
         "TopTactic":           top_tactic,
@@ -1543,7 +1603,7 @@ def append_to_history(
                 UniqueTactics       INTEGER NOT NULL,
                 BehaviorFamilyCount INTEGER NOT NULL,
                 TopBehaviorFamily   TEXT    NOT NULL DEFAULT '',
-                HasMDEAlert         INTEGER NOT NULL DEFAULT 0,
+                HasMDEAlert         INTEGER NOT NULL DEFAULT 0,  -- legacy/unused: kept so DEFAULT 0 satisfies NOT NULL on append; no longer written
                 CrossDeviceLink     INTEGER NOT NULL DEFAULT 0,
                 TopEpisodeScore     REAL    NOT NULL,
                 TopTactic           TEXT    NOT NULL DEFAULT '',
@@ -1642,21 +1702,20 @@ def compute_historical_baselines(
         seasons[col] = False
     seasons["NewTactics"] = ""
 
-    if history.empty:
-        emerg_mask = seasons["TotalRisk"] >= emerg_thresh
-        seasons.loc[emerg_mask, "IsEmergingEntity"] = True
-        seasons.loc[emerg_mask, "RunCount"] = 0
-        return seasons
-
+    # Filtering an empty history (first run) is safe — it yields an empty `prior`
+    # and we fall through to the single no-history return below.
     prior = history[
         (history["EntityType"] == entity_type) &
         (history["RunId"] != current_run_id)
     ].copy()
 
     if prior.empty:
+        # No prior runs to baseline against. Represent "no history" uniformly as
+        # RunCount=0 (not NaN) for every row, so a brand-new entity reads the same
+        # on the first run as it does on every later run.
+        seasons["RunCount"] = 0
         emerg_mask = seasons["TotalRisk"] >= emerg_thresh
         seasons.loc[emerg_mask, "IsEmergingEntity"] = True
-        seasons.loc[emerg_mask, "RunCount"] = 0
         return seasons
 
     prior_grouped = prior.groupby("EntityName")
@@ -1679,7 +1738,16 @@ def compute_historical_baselines(
         prev_score    = float(scores[-1])
         base_mean     = float(scores.mean())
         base_median   = float(np.median(scores))
-        base_std      = float(scores.std(ddof=0))   # 0.0 when n=1
+        # Sample std (ddof=1), not population std: the baseline is a *sample* of
+        # the entity's possible scores, not the whole universe. ddof=0 understates
+        # the spread on thin baselines (~1.22x tighter at n=3), inflating every
+        # Z-score and over-firing IsScoreSpike / IsZScoreAnomaly. ddof=1 needs n>1.
+        base_std      = float(scores.std(ddof=1)) if run_count > 1 else 0.0  # 0.0 when n=1
+        # NOTE: `scores` is limited to the most-recent `max_runs_per_entity` runs
+        # loaded by load_history (default 90), so hist_max is the high-water mark
+        # within that window, not the all-time max — IsNewHigh means "highest in
+        # recent memory." Widen the window or query an all-time MAX in SQL for a
+        # true record.
         hist_max      = float(scores.max())
 
         score_delta   = current_score - prev_score
@@ -1727,7 +1795,11 @@ def compute_historical_baselines(
                         t.strip() for t in str(ts_str).split(",") if t.strip()
                     )
                 new_tactics = current_ts - hist_ts_union
-                if new_tactics:
+                # Only flag adaptation when we actually have prior tactic data to
+                # diff against. Rows written before the TacticSet migration carry an
+                # empty TacticSet, so an entity whose entire baseline predates the
+                # migration would otherwise see *every* current tactic as "new".
+                if hist_ts_union and new_tactics:
                     seasons.at[idx, "IsAdaptingTactics"] = True
                     seasons.at[idx, "NewTactics"] = ", ".join(sorted(new_tactics))
 
@@ -1794,6 +1866,12 @@ def generate_historical_anomalies(
     if "EligibleForPriority" in combined.columns:
         combined = combined[combined["EligibleForPriority"].fillna(True).astype(bool)]
 
+    # Also exclude analyst-suppressed entities: a dispositioned false positive that
+    # trips a Z-score / new-high flag must not reappear here. Priority Cases already
+    # excludes suppressed entities, so this keeps the two sheets consistent.
+    if "IsSuppressed" in combined.columns:
+        combined = combined[~combined["IsSuppressed"].fillna(False).astype(bool)]
+
     any_flag = combined[flag_cols].apply(
         lambda col: col.fillna(False).astype(bool)
     ).any(axis=1)
@@ -1847,7 +1925,24 @@ def write_excel(
         risk_med  = wb.add_format({"bg_color": "#FFA500"})
         risk_low  = wb.add_format({"bg_color": "#FFFF88"})
 
+        used_sheet_names: set = set()
+
+        def _safe_sheet_name(name: str) -> str:
+            # Excel sheet names: max 31 chars, may not contain []:*?/\, non-blank,
+            # and must be unique within the workbook. Sanitize + dedupe so a future
+            # tactic with a long or punctuated name can't crash the run at the finish.
+            cleaned = re.sub(r"[\[\]:*?/\\]", "_", str(name)).strip()[:31] or "Sheet"
+            if cleaned in used_sheet_names:
+                base = cleaned[:28]
+                i = 2
+                while f"{base}_{i}" in used_sheet_names:
+                    i += 1
+                cleaned = f"{base}_{i}"
+            used_sheet_names.add(cleaned)
+            return cleaned
+
         def write_sheet(name: str, df: pd.DataFrame, freeze_col: int = 1):
+            name = _safe_sheet_name(name)
             if df.empty:
                 df = pd.DataFrame(columns=df.columns if hasattr(df, "columns") else [])
             # Excel doesn't support timezone-aware datetimes — strip tz info
