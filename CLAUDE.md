@@ -46,7 +46,7 @@ The backend (`web/app.py`) is a FastAPI server that:
 | Route | Page | Key API endpoint |
 |---|---|---|
 | `/` | Attack graph (Cytoscape.js) | `GET /api/graph` |
-| `/priority` | Priority Cases table | `GET /api/priority-cases` |
+| `/priority` | Priority Cases table (incl. triage status column) | `GET /api/priority-cases`, `GET/POST /api/triage` |
 | `/seasons` | Device + User Seasons | `GET /api/seasons/devices`, `/users` |
 | `/episodes` | Episode timeline | `GET /api/episodes`, `/user-episodes` |
 | `/history` | Historical trends (Plotly) | `GET /api/history` |
@@ -122,7 +122,7 @@ A pure-AI episode (`ai_share = 1`) collapses both bonuses to 1.0 (preserving the
 
 ### Excel output structure
 Sheets in order:
-1. **Priority Cases** — primary analyst view; eligible entities only, ranked by `TotalRisk`. AI/Dev-dominated single-tactic entities and analyst-suppressed entities are excluded here.
+1. **Priority Cases** — primary analyst view; eligible entities only, ranked by `TotalRisk`. AI/Dev-dominated single-tactic entities and analyst-suppressed entities are excluded here. Includes triage columns (`TriageStatus`, `TriageNote`, `TriagedBy`, `TriagedDate`, `TriageHasNewActivity`, `TriageStale`) stamped from `output/triage.db`; all rows stay in rank order regardless of triage state.
 2. **Device Seasons** — all devices including `PrimaryWorkflowClass`, `EligibleForPriority`, `ExclusionReason`, `IsSuppressed`, `SuppressReason` columns.
 3. **User Seasons** — same as Device Seasons but user-centric.
 4. **Historical Anomalies** — anomaly-flagged eligible entities (Z-score spikes, new highs, tactic expansion). Ineligible entities filtered out.
@@ -157,6 +157,16 @@ python suppress.py expire
 ```
 
 Suppressions are stored in `output/suppressions.csv` (gitignored). Expired entries are skipped automatically by `consolidate.py` — run `suppress.py expire` periodically to prune the file. The `suppression.store_path` config key controls the file location.
+
+## Triage states for Priority Cases
+
+Triage tracks the analyst's disposition of each Priority Cases entity across runs, so the same stable entities are not re-reviewed every Mon/Wed/Fri. States: **New** (implicit — no record) → **Investigating** (claimed; note optional) → **Benign** | **Escalated** (verdicts; note **required**). **Reopened** is derived, never stored: a Benign entity whose `LastSeen` is strictly newer than the snapshot taken at triage time flips to Reopened (strictly-newer matters — the 72h hunt window overlaps between runs, so re-exported events must not reopen cases). Investigating/Escalated keep their state on new activity but get a new-activity badge (●); Investigating older than `triage.stale_investigating_days` is flagged stale.
+
+All semantics live in the shared root-level `triage.py` module — one implementation used by both `consolidate.py` (stamps `TriageStatus`/`TriageNote`/`TriagedBy`/`TriagedDate`/`TriageHasNewActivity`/`TriageStale` columns onto the Priority Cases sheet) and the web backend (`web/api/triage.py`: `GET/POST /api/triage`, `GET /api/triage/log/{type}/{name}`; in-memory stamping in `web/state.py::_apply_triage`).
+
+The store is a single append-only `triage_log` table in `output/triage.db` (gitignored): current state = latest row per (EntityType, case-insensitive EntityName); full history is the audit trail, shown in the entity detail drawer. The store is deliberately **separate from `hunt_history.db`** so the documented baseline-reset procedure (delete `hunt_history.db`) never destroys analyst dispositions. `TriagedBy` is auto-captured from the OS username; verdict rows snapshot `LastSeen`/`TotalRisk`/`TacticSet` so the log shows what the analyst saw.
+
+In the dashboard: the Priority Cases status column is click-to-change, status filter chips default to hiding Benign, the right-click context menu has a Triage submenu (also on Seasons), and the Benign modal offers an "also suppress permanently" shortcut. Triage never changes scores or ranking — display and filtering only. Marking Benign is per-activity (auto-reopens on new activity); recurring benign noise should be suppressed instead.
 
 ## Adding a new detection
 
@@ -211,6 +221,8 @@ New tactic categories not already in `config.json` will score as 1 and log a war
 | `ai_workflow_detection_discounts` | Per-DetectionType score multiplier applied only to scenes classified as `AIWorkflow`. Reduces noise from detections that are expected behaviour for AI agents (e.g. Claude calling AI provider APIs triggers "AI Data Exfiltration" but is not suspicious). Detection types not listed keep their full score (1.0). High-severity detections (credential theft, persistence, MCP tampering) should not be discounted. |
 | `suppression.store_path` | Path to the analyst suppression CSV relative to the script directory (default `output/suppressions.csv`). Managed via `suppress.py`. |
 | `suppression.pattern_store_path` | Path to the pattern suppression JSON file (default `output/pattern_suppressions.json`). Managed via the web dashboard Pattern Rules tab. |
+| `triage.store_path` | Path to the analyst triage SQLite store (default `output/triage.db`). Append-only `triage_log` table; deliberately separate from `hunt_history.db` so baseline resets never delete triage state. |
+| `triage.stale_investigating_days` | Cases sitting in Investigating longer than this many days are flagged `TriageStale` (default 7 ≈ 3 hunt runs). |
 | `history.enabled` | Toggle historical analysis on/off (default true). When false the script behaves exactly as before this feature was added. |
 | `history.store_path` | Path to the SQLite history file relative to the script directory (default `output/hunt_history.db`). |
 | `history.minimum_runs_for_baseline` | Minimum prior runs required before IsNewHigh / IsScoreSpike / IsTacticExpansion can fire (default 3). Prevents noisy flags from thin baselines. |
@@ -238,7 +250,7 @@ A **Historical Anomalies** sheet (3rd in the workbook, before Attack Chains) sur
 
 **First run**: no history exists, DB is created automatically, all flags are False (except `IsEmergingEntity` for entities above the score threshold).
 
-**If config scoring weights change significantly** (e.g. tactic weight increase), the existing baseline will produce inflated Z-scores for all entities. In that case, reset the baseline by deleting `output/hunt_history.db` or pointing `history.store_path` to a new file.
+**If config scoring weights change significantly** (e.g. tactic weight increase), the existing baseline will produce inflated Z-scores for all entities. In that case, reset the baseline by deleting `output/hunt_history.db` or pointing `history.store_path` to a new file. Analyst triage state lives in the separate `output/triage.db` and survives a baseline reset.
 
 **Schema upgrades**: back up `hunt_history.db` before deploying script changes that modify the history schema. The `OutputVersion` constant in the script tracks schema versions.
 

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Card, Col, Empty, Row, Space, Spin, Statistic, Table, Tag, Typography } from 'antd'
-import { AlertOutlined, ApartmentOutlined, ExclamationCircleOutlined, StopOutlined } from '@ant-design/icons'
+import { AlertOutlined, ApartmentOutlined, ExclamationCircleOutlined, FlagOutlined, StopOutlined } from '@ant-design/icons'
+import { useNavigate } from 'react-router-dom'
 import createPlotlyComponent from 'react-plotly.js/factory'
 import Plotly from 'plotly.js-dist-min'
 import { api } from '../api'
@@ -78,6 +79,7 @@ export default function InsightsPage() {
   const [data, setData]     = useState(null)
   const [loading, setLoading] = useState(true)
   const { pipelineStatus }  = useApp()
+  const navigate = useNavigate()
 
   useEffect(() => {
     setLoading(true)
@@ -101,6 +103,8 @@ export default function InsightsPage() {
     total_users          = 0,
     suppressed_count     = 0,
     flag_counts          = {},
+    triage_counts        = {},
+    triage_stale_count   = 0,
     tactic_distribution  = [],
     workflow_breakdown   = [],
     top_flagged          = [],
@@ -229,7 +233,7 @@ export default function InsightsPage() {
 
       {/* ── KPI row ── */}
       <Row gutter={16}>
-        <Col span={6}>
+        <Col span={5}>
           <Card size="small">
             <Statistic
               title="Priority Cases"
@@ -248,7 +252,40 @@ export default function InsightsPage() {
           </Card>
         </Col>
 
-        <Col span={6}>
+        <Col span={5}>
+          <Card
+            size="small"
+            hoverable
+            onClick={() => navigate('/priority')}
+            style={{ cursor: 'pointer' }}
+          >
+            <Statistic
+              title="Triage Queue"
+              value={(triage_counts.New ?? 0) + (triage_counts.Reopened ?? 0)}
+              prefix={<FlagOutlined />}
+              valueStyle={{
+                color: (triage_counts.New ?? 0) + (triage_counts.Reopened ?? 0) > 0
+                  ? palette.secondary : palette.success,
+              }}
+            />
+            <Space size={2} wrap style={{ marginTop: 4 }}>
+              {(triage_counts.Reopened ?? 0) > 0 && (
+                <Tag color="volcano" style={{ fontSize: 10, padding: '0 4px' }}>Reopened {triage_counts.Reopened}</Tag>
+              )}
+              {(triage_counts.Investigating ?? 0) > 0 && (
+                <Tag color="gold" style={{ fontSize: 10, padding: '0 4px' }}>Investigating {triage_counts.Investigating}</Tag>
+              )}
+              {(triage_counts.Escalated ?? 0) > 0 && (
+                <Tag color="red" style={{ fontSize: 10, padding: '0 4px' }}>Escalated {triage_counts.Escalated}</Tag>
+              )}
+              {triage_stale_count > 0 && (
+                <Tag style={{ fontSize: 10, padding: '0 4px' }}>{triage_stale_count} stale</Tag>
+              )}
+            </Space>
+          </Card>
+        </Col>
+
+        <Col span={5}>
           <Card size="small">
             <Statistic
               title="Flagged Entities"
@@ -268,7 +305,7 @@ export default function InsightsPage() {
           </Card>
         </Col>
 
-        <Col span={6}>
+        <Col span={5}>
           <Card size="small">
             <Statistic
               title="Active Scope"
@@ -282,7 +319,7 @@ export default function InsightsPage() {
           </Card>
         </Col>
 
-        <Col span={6}>
+        <Col span={4}>
           <Card size="small">
             <Statistic
               title="Suppressed"

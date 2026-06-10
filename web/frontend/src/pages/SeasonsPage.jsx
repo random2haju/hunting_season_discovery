@@ -140,7 +140,7 @@ export default function SeasonsPage() {
   const [familyFilter, setFamilyFilter] = useState([])
   const { pipelineStatus, selectedEntity, setSelectedEntity } = useApp()
   const { openDetail, entityDetailDrawer } = useEntityDetailDrawer()
-  const { onRow, contextMenuPortal, suppressModal } = useEntityContextMenu({ onViewDetails: openDetail })
+  const { onRow, contextMenuPortal, suppressModal, triageModal } = useEntityContextMenu({ onViewDetails: openDetail })
 
   const tableOnRow = useCallback(
     (record) => ({
@@ -221,6 +221,7 @@ export default function SeasonsPage() {
     <>
       {contextMenuPortal}
       {suppressModal}
+      {triageModal}
       {entityDetailDrawer}
       <Space style={{ marginBottom: 12 }} wrap>
         <Radio.Group

@@ -11,9 +11,10 @@ import threading
 import webbrowser
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 # Ensure both the repo root (for consolidate.py) and web/ (for api/ + state.py) are importable
@@ -33,9 +34,43 @@ from api.history import router as history_router
 from api.suppressions import router as suppressions_router
 from api.recommendations import router as recommendations_router
 from api.patterns import router as patterns_router
+from api.triage import router as triage_router
 from state import find_latest_excel, load_from_excel
 
 app = FastAPI(title="Threat Hunt Dashboard", version="1.0.0")
+
+# SECURITY: this server binds to loopback and exposes sensitive hunt data (device names,
+# account names, raw endpoint command lines) plus a GET endpoint that triggers a full
+# pipeline run. Two cross-origin attack classes apply even on localhost:
+#   1. DNS rebinding — an attacker page rebinds its hostname to 127.0.0.1 to READ the API.
+#      Defeated by validating the Host header (TrustedHostMiddleware below).
+#   2. CSRF — a page the analyst visits issues `new Image().src = "http://localhost:8000/
+#      api/pipeline/run"` (a "simple" GET that CORS does not block) to trigger a run.
+#      Defeated by the Sec-Fetch-Site guard below, which rejects cross-site requests.
+
+# (1) DNS-rebinding defense: only accept requests whose Host header is loopback.
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["localhost", "127.0.0.1", "localhost:8000", "127.0.0.1:8000"],
+)
+
+
+# (2) CSRF / cross-site defense for the API surface. Modern browsers send the
+# Sec-Fetch-Site metadata header on every request (including <img>/<script>/EventSource);
+# a value of "cross-site" means the request originated from a different site, which is
+# never legitimate for this dashboard. Same-origin (the served SPA) and same-site (the
+# Vite dev server on a different port) are allowed; the header's absence (legacy clients,
+# curl) is allowed so local tooling still works.
+@app.middleware("http")
+async def block_cross_site_api(request: Request, call_next):
+    if request.url.path.startswith("/api/"):
+        if request.headers.get("sec-fetch-site") == "cross-site":
+            return JSONResponse(
+                status_code=403,
+                content={"error": "Cross-site requests to the API are not allowed"},
+            )
+    return await call_next(request)
+
 
 # Allow Vite dev server (port 5173) during frontend development
 app.add_middleware(
@@ -56,6 +91,7 @@ app.include_router(history_router, prefix="/api")
 app.include_router(suppressions_router, prefix="/api")
 app.include_router(recommendations_router, prefix="/api")
 app.include_router(patterns_router, prefix="/api")
+app.include_router(triage_router, prefix="/api")
 
 # Serve the built React bundle.
 # Routes are registered unconditionally — if dist/ hasn't been built yet

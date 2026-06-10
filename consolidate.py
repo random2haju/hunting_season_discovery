@@ -27,6 +27,8 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
+import triage as triage_store
+
 REQUIRED_COLUMNS = {"Timestamp", "DeviceName", "AccountName", "DetectionType", "TacticCategory", "Evidence"}
 HISTORY_OUTPUT_VERSION = 1
 
@@ -1916,7 +1918,15 @@ def write_excel(
     cfg: dict,
     suppressed_entities: "pd.DataFrame | None" = None,
 ):
-    with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+    # SECURITY: disable xlsxwriter's default string→formula/URL conversion. Evidence
+    # strings carry attacker-controlled command lines from monitored endpoints; a value
+    # like '=HYPERLINK("http://attacker/",...)' would otherwise be written as a LIVE
+    # formula and execute when an analyst opens the workbook (CSV/Excel injection).
+    with pd.ExcelWriter(
+        output_path,
+        engine="xlsxwriter",
+        engine_kwargs={"options": {"strings_to_formulas": False, "strings_to_urls": False}},
+    ) as writer:
         wb = writer.book
 
         # Formats
@@ -2214,6 +2224,20 @@ def main():
     print("[*] Building priority investigation cases...")
     priority_cases = build_priority_cases(device_seasons, user_seasons, cfg)
     print(f"    Priority cases: {len(priority_cases)}")
+
+    # Stamp analyst triage state (separate store: output/triage.db) onto Priority
+    # Cases. Triage never changes scores or ranking — display columns only.
+    try:
+        t_path = triage_store.resolve_store_path(cfg, os.path.dirname(os.path.abspath(__file__)))
+        t_states = triage_store.load_current_states(t_path)
+        priority_cases = triage_store.stamp_triage(priority_cases, t_states, cfg)
+        if t_states and not priority_cases.empty:
+            triaged = int((priority_cases["TriageStatus"] != "New").sum())
+            reopened = int((priority_cases["TriageStatus"] == "Reopened").sum())
+            print(f"    Triage: {triaged} case(s) carry analyst state"
+                  + (f", {reopened} reopened by new activity" if reopened else ""))
+    except Exception as exc:
+        print(f"  [WARN] Could not stamp triage state: {exc}")
 
     # Build suppressed entities view for audit sheet
     def _build_suppressed(dev_df, usr_df):

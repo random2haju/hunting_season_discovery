@@ -16,11 +16,13 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { DatePicker, Form, Input, Menu, message, Modal } from 'antd'
 import {
   EyeOutlined,
+  FlagOutlined,
   InfoCircleOutlined,
   StopOutlined,
 } from '@ant-design/icons'
 import { useApp } from '../context/AppContext'
 import { api } from '../api'
+import { triageMenuChildren, useTriageModal } from './TriageControls'
 
 function resolveEntity(record) {
   if (!record) return { name: '', type: 'Device' }
@@ -32,12 +34,13 @@ function resolveEntity(record) {
   return { name, type }
 }
 
-export function useEntityContextMenu({ onViewDetails } = {}) {
+export function useEntityContextMenu({ onViewDetails, onTriageChanged } = {}) {
   const { navigateTo } = useApp()
   const [menu, setMenu] = useState({ open: false, x: 0, y: 0, record: null })
   const [suppressState, setSuppressState] = useState({ open: false, record: null })
   const [form] = Form.useForm()
   const menuRef = useRef(null)
+  const { openTriage, triageModal } = useTriageModal({ onChanged: onTriageChanged })
 
   // Close context menu on outside click
   useEffect(() => {
@@ -70,6 +73,14 @@ export function useEntityContextMenu({ onViewDetails } = {}) {
         setMenu((m) => ({ ...m, open: false }))
       },
     }] : []),
+    {
+      key: 'triage',
+      icon: <FlagOutlined />,
+      label: 'Triage',
+      children: triageMenuChildren(menu.record, openTriage, () =>
+        setMenu((m) => ({ ...m, open: false })),
+      ),
+    },
     {
       key: 'suppress',
       icon: <StopOutlined />,
@@ -161,5 +172,5 @@ export function useEntityContextMenu({ onViewDetails } = {}) {
     </Modal>
   )
 
-  return { contextMenu: menu, onRow, contextMenuPortal, suppressModal, openSuppressModal }
+  return { contextMenu: menu, onRow, contextMenuPortal, suppressModal, triageModal, openSuppressModal, openTriage }
 }

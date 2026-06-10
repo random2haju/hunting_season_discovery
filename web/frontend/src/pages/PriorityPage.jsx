@@ -6,6 +6,7 @@ import { ColHeader } from '../components/ColHeader'
 import EmptyState from '../components/EmptyState'
 import { useEntityContextMenu } from '../components/EntityContextMenu'
 import { useEntityDetailDrawer } from '../components/EntityDetailDrawer'
+import { TriagePicker, TRIAGE_STATUSES } from '../components/TriageControls'
 import { useApp } from '../context/AppContext'
 import { palette, riskColor as RISK_COLOR } from '../theme'
 
@@ -155,15 +156,30 @@ const COLUMNS = [
   },
 ]
 
+// Default status filter hides Benign — dispositioned cases leave the queue,
+// one click on the Benign chip brings them back.
+const DEFAULT_STATUS_FILTER = TRIAGE_STATUSES.filter((s) => s !== 'Benign')
+
 export default function PriorityPage() {
   const [data, setData] = useState([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [tacticFilter, setTacticFilter] = useState([])
   const [familyFilter, setFamilyFilter] = useState([])
+  const [statusFilter, setStatusFilter] = useState(DEFAULT_STATUS_FILTER)
   const { pipelineStatus } = useApp()
-  const { openDetail, entityDetailDrawer } = useEntityDetailDrawer()
-  const { onRow, contextMenuPortal, suppressModal } = useEntityContextMenu({ onViewDetails: openDetail })
+
+  const load = useCallback(() => {
+    setLoading(true)
+    api.priorityCases().then(({ data: d }) => {
+      setData(d?.data ?? [])
+      setLoading(false)
+    })
+  }, [])
+
+  const { openDetail, entityDetailDrawer } = useEntityDetailDrawer({ onTriageChanged: load })
+  const { onRow, contextMenuPortal, suppressModal, triageModal, openTriage } =
+    useEntityContextMenu({ onViewDetails: openDetail, onTriageChanged: load })
 
   const tableOnRow = useCallback(
     (record) => ({
@@ -175,12 +191,36 @@ export default function PriorityPage() {
   )
 
   useEffect(() => {
-    setLoading(true)
-    api.priorityCases().then(({ data: d }) => {
-      setData(d?.data ?? [])
-      setLoading(false)
+    load()
+  }, [pipelineStatus.loaded_file, load])
+
+  const columns = useMemo(() => {
+    const statusCol = {
+      title: (
+        <ColHeader
+          label="Status"
+          tip="Analyst triage state. New = untriaged; Investigating = claimed; Benign / Escalated = verdicts (note required); Reopened = was Benign but newer activity arrived. ● = new activity since triage; clock = stale investigation. Click to change."
+        />
+      ),
+      dataIndex: 'TriageStatus',
+      key: 'TriageStatus',
+      width: 110,
+      render: (_, r) => <TriagePicker record={r} openTriage={openTriage} />,
+    }
+    const cols = [...COLUMNS]
+    cols.splice(2, 0, statusCol)
+    return cols
+  }, [openTriage])
+
+  const statusCounts = useMemo(() => {
+    const counts = {}
+    TRIAGE_STATUSES.forEach((s) => { counts[s] = 0 })
+    data.forEach((r) => {
+      const s = r.TriageStatus ?? 'New'
+      counts[s] = (counts[s] ?? 0) + 1
     })
-  }, [pipelineStatus.loaded_file])
+    return counts
+  }, [data])
 
   const allTactics = useMemo(() => {
     const set = new Set()
@@ -200,6 +240,9 @@ export default function PriorityPage() {
 
   const filtered = useMemo(() => {
     let result = data
+    if (statusFilter.length < TRIAGE_STATUSES.length) {
+      result = result.filter((r) => statusFilter.includes(r.TriageStatus ?? 'New'))
+    }
     if (search) {
       const q = search.toLowerCase()
       result = result.filter(
@@ -222,7 +265,7 @@ export default function PriorityPage() {
       })
     }
     return result
-  }, [data, search, tacticFilter, familyFilter])
+  }, [data, search, tacticFilter, familyFilter, statusFilter])
 
   if (!loading && !pipelineStatus.is_loaded) return <EmptyState />
 
@@ -230,8 +273,23 @@ export default function PriorityPage() {
     <>
       {contextMenuPortal}
       {suppressModal}
+      {triageModal}
       {entityDetailDrawer}
       <Space style={{ marginBottom: 12 }} wrap>
+        <Space size={2}>
+          {TRIAGE_STATUSES.map((s) => (
+            <Tag.CheckableTag
+              key={s}
+              checked={statusFilter.includes(s)}
+              onChange={(checked) =>
+                setStatusFilter((f) => (checked ? [...f, s] : f.filter((x) => x !== s)))
+              }
+              style={{ fontSize: 11, border: `1px solid ${palette.border}` }}
+            >
+              {s} {statusCounts[s] ?? 0}
+            </Tag.CheckableTag>
+          ))}
+        </Space>
         <Input
           prefix={<SearchOutlined />}
           placeholder="Search entity, tactic or family…"
@@ -262,12 +320,13 @@ export default function PriorityPage() {
         />
         <Text type="secondary" style={{ fontSize: 12 }}>
           {filtered.length} case{filtered.length !== 1 ? 's' : ''}
-          {(search || tacticFilter.length > 0 || familyFilter.length > 0) ? ` (filtered from ${data.length})` : ''}
+          {(search || tacticFilter.length > 0 || familyFilter.length > 0
+            || statusFilter.length < TRIAGE_STATUSES.length) ? ` (filtered from ${data.length})` : ''}
         </Text>
       </Space>
       <Table
         dataSource={filtered}
-        columns={COLUMNS}
+        columns={columns}
         rowKey={(r) => `${r.EntityType}-${r.EntityName}`}
         loading={loading}
         size="small"

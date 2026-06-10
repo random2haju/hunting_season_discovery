@@ -1,0 +1,117 @@
+// ============================================================
+// Defense Evasion — Process Injection / Hollowing (behavioral proxies)
+// TacticCategory: DefenseEvasion
+// Source (FDR, normalized): process-creation events
+//
+// COVERAGE NOTE: raw FDR does NOT emit a generic CreateRemoteThread /
+// WriteProcessMemory event the way Sysmon (EID 8/10) does. So this query
+// relies on high-fidelity *behavioral proxies* that ARE visible in
+// process telemetry:
+//   1. mavinject.exe /INJECTRUNNING        — direct injection LOLBin
+//   2. svchost.exe with a non-services.exe parent — hollowing/masquerade
+//   3. core system binaries running outside System32/SysWOW64 — masquerade
+//   4. known token/injection offensive tool names
+// For true in-memory injection coverage, ALSO triage CrowdStrike's own
+// detection stream (its sensor catches injection that FDR telemetry does
+// not expose) — see the recommended falcon_detects triage query.
+//
+// If your normalized schema DOES carry a cross-process / remote-thread
+// event, wire it into the OPTIONAL second adapter at the bottom.
+//
+// FP Reduction: hunt/baseline windows, first-seen, prevalence dcount.
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 7d;
+let prevalence_threshold = 5;
+
+// ===================== SCHEMA ADAPTER =======================
+// EDIT ONLY THIS BLOCK. Map your normalized process table + columns.
+let ProcessEvents =
+    CHANGE_ME_ProcessEvents                    // <-- your normalized process-creation table
+    | project
+        Timestamp          = Timestamp,
+        DeviceName         = DeviceName,
+        AccountName        = AccountName,
+        FileName           = FileName,          // child image leaf
+        FolderPath         = FolderPath,        // child full image path (for masquerade check)
+        ProcessCommandLine = ProcessCommandLine,
+        ParentFileName     = ParentFileName;    // parent image leaf
+// =================== END SCHEMA ADAPTER =====================
+
+// Core Windows binaries that should only ever run from System32/SysWOW64
+let system_bins = dynamic([
+    "svchost.exe","lsass.exe","csrss.exe","smss.exe","wininit.exe",
+    "services.exe","winlogon.exe","spoolsv.exe","taskhostw.exe","dllhost.exe"
+]);
+// Legitimate parents of svchost (services.exe + a couple of EDR sandboxes)
+let svchost_ok_parents = dynamic(["services.exe","msmpeng.exe","mssense.exe",""]);
+// Token-abuse / injection offensive tooling
+let injector_names = dynamic([
+    "mavinject.exe","printspoofer.exe","juicypotato.exe","roguepotato.exe",
+    "sweetpotato.exe","godpotato.exe","efspotato.exe","rottenpotato.exe","syringe.exe"
+]);
+
+let all_suspicious = materialize(
+    ProcessEvents
+    | where Timestamp > ago(baseline_window)
+    | extend pFile   = tolower(FileName),
+             pParent = tolower(ParentFileName),
+             pCmd    = tolower(ProcessCommandLine),
+             pPath   = tolower(FolderPath)
+    | extend Pattern = case(
+        pFile == "mavinject.exe" and pCmd has "injectrunning",
+            "MavinjectInjection",
+        pFile == "svchost.exe" and pParent !in (svchost_ok_parents),
+            "SvchostAnomalousParent",
+        pFile in (system_bins)
+            and not(pPath has "\\system32\\" or pPath has "\\syswow64\\"),
+            "SystemBinaryMasquerade",
+        pFile in (injector_names)
+            or pCmd has_any ("printspoofer","juicypotato","godpotato","roguepotato","seimpersonate"),
+            "TokenInjectionTool",
+        ""
+      )
+    | where Pattern != ""
+    | extend Evidence = strcat(
+        "Pattern: ",  Pattern,
+        " | Process: ", FileName,
+        " | Path: ",    FolderPath,
+        " | Parent: ",  ParentFileName,
+        " | CmdLine: ", ProcessCommandLine
+      )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType  = "Process Injection",
+        TacticCategory = "DefenseEvasion",
+        Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+detections
+| join kind=inner    rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc
+
+// ===================== OPTIONAL =============================
+// If your normalized schema carries a cross-process / remote-thread event
+// (some Falcon-to-ADX pipelines surface "InjectedThread" / "ProcessInjection"
+// behavioral events), uncomment and adapt the block below, then union its
+// output into all_suspicious above.
+//
+// let InjectionEvents =
+//     CHANGE_ME_CrossProcessTable
+//     | project Timestamp, DeviceName, AccountName,
+//               SourceImage = SourceProcessName,
+//               TargetImage = TargetProcessName,
+//               Technique   = InjectionType
+//     | extend Evidence = strcat("Pattern: RemoteThread | Source: ", SourceImage,
+//                                " | Target: ", TargetImage, " | Technique: ", Technique)
+//     | project Timestamp, DeviceName, AccountName,
+//               DetectionType="Process Injection", TacticCategory="DefenseEvasion", Evidence;

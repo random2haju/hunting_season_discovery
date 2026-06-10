@@ -1,0 +1,105 @@
+// ============================================================
+// Privilege Escalation — UAC Bypass / Token & Service Abuse
+// TacticCategory: PrivilegeEscalation
+// Source (FDR, normalized): process-creation events
+//
+// Branches:
+//   1. UACBypassAutoElevate    — an auto-elevating Windows binary
+//        (fodhelper, computerdefaults, eventvwr, sdclt, slui, wsreset,
+//         cmstp ...) spawning a shell. These are hijacked via registry/
+//         DLL tricks to run a child HIGH-integrity without a UAC prompt.
+//   2. TokenImpersonationTool  — Potato-family / SeImpersonate abuse.
+//   3. ServiceBinpathToUserPath— sc.exe creating/altering a service whose
+//        binPath points at a user-writable dir or a shell → SYSTEM exec.
+//   4. TokenPrivilegeManipulation — explicit privilege-enable patterns.
+//   5. (OPTIONAL) UnexpectedElevation — integrity-level jump from a
+//        non-consent.exe parent (enable only if you map IntegrityLevel).
+//
+// FP Reduction: hunt/baseline windows, first-seen, prevalence dcount.
+//   - Add admin-tooling parents (e.g. your patch/install agent) to an
+//     exclusion if it legitimately drives sc.exe.
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 7d;
+let prevalence_threshold = 5;
+
+// ===================== SCHEMA ADAPTER =======================
+// EDIT ONLY THIS BLOCK. The two Integrity* fields are OPTIONAL — delete
+// them (and branch 5) if your schema doesn't carry integrity levels.
+let ProcessEvents =
+    CHANGE_ME_ProcessEvents                    // <-- your normalized process-creation table
+    | project
+        Timestamp          = Timestamp,
+        DeviceName         = DeviceName,
+        AccountName        = AccountName,
+        FileName           = FileName,
+        ProcessCommandLine = ProcessCommandLine,
+        ParentFileName     = ParentFileName
+        // , IntegrityLevel   = IntegrityLevel        // OPTIONAL (child)
+        // , ParentIntegrity  = ParentIntegrityLevel  // OPTIONAL (parent)
+        ;
+// =================== END SCHEMA ADAPTER =====================
+
+let uac_autoelevate = dynamic([
+    "fodhelper.exe","computerdefaults.exe","eventvwr.exe","sdclt.exe",
+    "slui.exe","wsreset.exe","dccw.exe","cmstp.exe","compmgmtlauncher.exe"
+]);
+let shells = dynamic([
+    "cmd.exe","powershell.exe","pwsh.exe","wscript.exe","cscript.exe",
+    "mshta.exe","rundll32.exe","regsvr32.exe"
+]);
+let potato_tools = dynamic([
+    "printspoofer.exe","juicypotato.exe","roguepotato.exe","sweetpotato.exe",
+    "godpotato.exe","efspotato.exe","rottenpotato.exe","sharpefspotato.exe"
+]);
+
+let all_suspicious = materialize(
+    ProcessEvents
+    | where Timestamp > ago(baseline_window)
+    | extend pFile   = tolower(FileName),
+             pParent = tolower(ParentFileName),
+             pCmd    = tolower(ProcessCommandLine)
+    | extend Pattern = case(
+        pParent in (uac_autoelevate) and pFile in (shells),
+            "UACBypassAutoElevate",
+        pFile in (potato_tools)
+            or pCmd has_any ("printspoofer","juicypotato","godpotato","roguepotato","seimpersonateprivilege"),
+            "TokenImpersonationTool",
+        pFile == "sc.exe" and pCmd has "binpath"
+            and pCmd has_any ("\\temp\\","\\appdata\\","\\users\\public\\","\\programdata\\","cmd.exe","powershell"),
+            "ServiceBinpathToUserPath",
+        pCmd has_any ("sedebugprivilege","adjusttokenprivileges","setsecuritydescriptor","seimpersonateprivilege"),
+            "TokenPrivilegeManipulation",
+        // 5. OPTIONAL — uncomment after mapping Integrity fields above:
+        // tolower(ParentIntegrity) in ("medium","low")
+        //     and tolower(IntegrityLevel) in ("high","system")
+        //     and pParent != "consent.exe",
+        //     "UnexpectedElevation",
+        ""
+      )
+    | where Pattern != ""
+    | extend Evidence = strcat(
+        "Pattern: ",  Pattern,
+        " | Process: ", FileName,
+        " | Parent: ",  ParentFileName,
+        " | CmdLine: ", ProcessCommandLine
+      )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType  = "Privilege Escalation Attempt",
+        TacticCategory = "PrivilegeEscalation",
+        Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+detections
+| join kind=inner    rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

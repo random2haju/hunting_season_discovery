@@ -1,0 +1,95 @@
+// ============================================================
+// Defense Evasion — BYOVD (Bring Your Own Vulnerable Driver)
+// TacticCategory: DefenseEvasion
+// Source (FDR, normalized): kernel module / driver load events
+//
+// Attackers load a *signed but vulnerable* driver to gain kernel
+// primitives (kill EDR, read/write arbitrary memory). Because the
+// driver is legitimately signed, signature checks alone won't flag it —
+// the name/hash allowlist is what catches it. Three branches:
+//   1. KnownVulnerableDriver      — name matches the loldrivers list
+//   2. DriverFromUserWritablePath — driver loaded from Temp/AppData/etc.
+//   3. UnsignedDriverLoad         — unsigned / invalid signature
+//
+// IMPORTANT: branch 1 is high-confidence. Consider letting it bypass
+// first-seen suppression (a vulnerable driver loading EVERY day is still
+// bad) — see the toggle in the FP-reduction section.
+//
+// Keep the known-vulnerable list current from https://www.loldrivers.io
+// (export the driver filenames and, ideally, SHA256 hashes).
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 7d;
+let prevalence_threshold = 5;
+
+// ===================== SCHEMA ADAPTER =======================
+// EDIT ONLY THIS BLOCK. Point at your normalized driver/module-load table.
+// If you don't have a signature field, delete SignatureStatus and the
+// UnsignedDriverLoad branch below.
+let DriverEvents =
+    CHANGE_ME_DriverLoadEvents                 // <-- your normalized driver-load table
+    | project
+        Timestamp       = Timestamp,
+        DeviceName      = DeviceName,
+        AccountName     = AccountName,          // often empty for kernel loads — fine
+        ModuleName      = ModuleName,           // driver leaf name, e.g. rtcore64.sys
+        ModulePath      = ModulePath,           // full path on disk
+        SHA256          = SHA256,               // image hash (best key — match on this if you can)
+        SignatureStatus = SignatureStatus;      // "Signed"/"Unsigned"/"Invalid"/...
+// =================== END SCHEMA ADAPTER =====================
+
+// Starter set of notorious abusable drivers — EXPAND from loldrivers.io.
+let known_vuln_drivers = dynamic([
+    "rtcore64.sys","gdrv.sys","dbutil_2_3.sys","dbutildrv2.sys","iqvw64e.sys",
+    "winio.sys","winring0x64.sys","asio.sys","asio64.sys","ene.sys","enetechio64.sys",
+    "mhyprot2.sys","capcom.sys","truesight.sys","viragt64.sys","echo_driver.sys",
+    "wnbios.sys","rwdrv.sys","gmer64.sys","kprocesshacker.sys","procexp152.sys",
+    "msio64.sys","nvoclock.sys","atillk64.sys","speedfan.sys","amifldrv64.sys"
+]);
+let writable_paths = dynamic([
+    "\\users\\","\\temp\\","\\appdata\\","\\programdata\\",
+    "\\downloads\\","\\windows\\temp\\","\\public\\"
+]);
+
+let all_suspicious = materialize(
+    DriverEvents
+    | where Timestamp > ago(baseline_window)
+    | extend mName = tolower(ModuleName), mPath = tolower(ModulePath)
+    | extend Pattern = case(
+        mName in (known_vuln_drivers),                       "KnownVulnerableDriver",
+        mPath has_any (writable_paths),                      "DriverFromUserWritablePath",
+        tolower(SignatureStatus) in ("unsigned","invalid","untrusted",""),
+                                                             "UnsignedDriverLoad",
+        ""
+      )
+    | where Pattern != ""
+    | extend Evidence = strcat(
+        "Pattern: ",  Pattern,
+        " | Driver: ",    ModuleName,
+        " | Path: ",      ModulePath,
+        " | SHA256: ",    SHA256,
+        " | Signature: ", SignatureStatus
+      )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType  = "Vulnerable Driver Load",
+        TacticCategory = "DefenseEvasion",
+        Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+// NOTE: to keep KnownVulnerableDriver hits surfacing even when seen in the
+// baseline, replace the `leftanti baseline` join below with:
+//   | where Evidence has "Pattern: KnownVulnerableDriver"
+//       or Evidence !in (toscalar(... baseline ...))   // or simply split branches
+detections
+| join kind=inner    rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

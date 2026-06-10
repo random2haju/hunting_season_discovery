@@ -1,0 +1,108 @@
+// ============================================================
+// Initial Access — Phishing / Delivery Payload Execution
+// TacticCategory: InitialAccess
+// Source (FDR, normalized): process-creation events
+//
+// Catches the canonical "user opened the attachment / link" pattern:
+//   - Office / mail / PDF apps spawning a script host or shell
+//   - Browsers spawning a script host with download/encoded markers
+//   - Script hosts / LOLBins executing FROM a delivery path
+//     (Downloads, Temp, AppData, mounted archive, Public)
+//   - Shortcut / archive double-click via explorer into a shell
+//
+// This is pure process-lineage logic, so it survives FDR field
+// renaming as long as the SCHEMA ADAPTER block below is mapped to
+// your normalized column names.
+//
+// FP Reduction:
+//   - hunt_window / baseline_window / prevalence_threshold
+//   - First-seen per-device baselining
+//   - Prevalence dcount across the fleet
+// Tuning:
+//   - If a sanctioned macro-enabled LOB app legitimately shells out,
+//     add its child process to an exclusion below.
+// ============================================================
+let hunt_window          = 1d;
+let baseline_window      = 7d;   // 7d = safe ADX ceiling per repo guidance
+let prevalence_threshold = 5;
+
+// ===================== SCHEMA ADAPTER =======================
+// EDIT ONLY THIS BLOCK. Point it at your normalized process table and
+// map your column names onto the canonical names on the LEFT. Delete a
+// mapping (and any logic that uses it) if your schema lacks that field.
+let ProcessEvents =
+    CHANGE_ME_ProcessEvents                    // <-- your normalized process-creation table
+    | project
+        Timestamp          = Timestamp,         // event time (datetime)
+        DeviceName         = DeviceName,        // hostname
+        AccountName        = AccountName,       // user
+        FileName           = FileName,          // child image leaf, e.g. powershell.exe
+        FolderPath         = FolderPath,        // child full image path
+        ProcessCommandLine = ProcessCommandLine,
+        ParentFileName     = ParentFileName;    // parent image leaf
+// =================== END SCHEMA ADAPTER =====================
+
+let office_parents = dynamic([
+    "winword.exe","excel.exe","powerpnt.exe","outlook.exe","onenote.exe",
+    "mspub.exe","visio.exe","wordpad.exe","acrord32.exe","acrobat.exe"
+]);
+let browser_parents = dynamic([
+    "chrome.exe","msedge.exe","firefox.exe","iexplore.exe","opera.exe","brave.exe"
+]);
+let script_children = dynamic([
+    "cmd.exe","powershell.exe","pwsh.exe","wscript.exe","cscript.exe","mshta.exe",
+    "rundll32.exe","regsvr32.exe","bitsadmin.exe","certutil.exe","curl.exe",
+    "installutil.exe","msbuild.exe","schtasks.exe","wmic.exe","hh.exe"
+]);
+let delivery_paths = dynamic([
+    "\\downloads\\","\\temp\\","\\appdata\\local\\temp\\","\\users\\public\\",
+    "\\appdata\\roaming\\","\\windows\\temp\\"
+]);
+
+let all_suspicious = materialize(
+    ProcessEvents
+    | where Timestamp > ago(baseline_window)
+    | extend pFile   = tolower(FileName),
+             pParent = tolower(ParentFileName),
+             pCmd    = tolower(ProcessCommandLine),
+             pPath   = tolower(FolderPath)
+    | extend Pattern = case(
+        pParent in (office_parents) and pFile in (script_children),
+            "OfficeSpawnedShell",
+        pParent in (browser_parents) and pFile in (script_children)
+            and pCmd has_any ("http","-enc","-encodedcommand","frombase64string",
+                              "downloadstring","downloadfile","iex","invoke-expression"),
+            "BrowserSpawnedShell",
+        pFile in (script_children) and pPath has_any (delivery_paths),
+            "ExecFromDeliveryPath",
+        pParent == "explorer.exe" and pFile in (script_children)
+            and pCmd has_any (delivery_paths),
+            "ShortcutOrArchiveExec",
+        ""
+      )
+    | where Pattern != ""
+    | extend Evidence = strcat(
+        "Pattern: ",  Pattern,
+        " | Process: ", FileName,
+        " | Parent: ",  ParentFileName,
+        " | CmdLine: ", ProcessCommandLine
+      )
+    | project Timestamp, DeviceName, AccountName,
+        DetectionType  = "Phishing Payload Execution",
+        TacticCategory = "InitialAccess",
+        Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+detections
+| join kind=inner    rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

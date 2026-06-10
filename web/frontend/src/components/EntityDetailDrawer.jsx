@@ -21,6 +21,7 @@ import {
 import { api } from '../api'
 import { useApp } from '../context/AppContext'
 import { palette, riskColor as RISK_COLOR } from '../theme'
+import { TriageTag, TRIAGE_COLORS, useTriageModal } from './TriageControls'
 
 const { Text } = Typography
 
@@ -301,9 +302,85 @@ export function SuppressModal({ open, name, type, onClose }) {
   )
 }
 
+// ── Triage section: current state, action buttons, audit log ─────────────────
+
+function TriageSection({ name, type, onTriageChanged }) {
+  const [log, setLog] = useState([])
+  const [current, setCurrent] = useState(null)
+  const [bump, setBump] = useState(0)
+
+  const { openTriage, triageModal } = useTriageModal({
+    onChanged: () => {
+      setBump((b) => b + 1)
+      onTriageChanged?.()
+    },
+  })
+
+  // Always resolve the effective state from the API (not the possibly-stale row
+  // the drawer was opened with) so changes made here are reflected immediately.
+  useEffect(() => {
+    if (!name) return
+    api.triageLog(type, name).then(({ data }) => setLog(data?.data ?? []))
+    api.triage().then(({ data }) => {
+      const m = (data?.data ?? []).find(
+        (t) => t.EntityType === type && t.EntityName?.toLowerCase() === name.toLowerCase(),
+      )
+      setCurrent(m ?? null)
+    })
+  }, [name, type, bump])
+
+  const display = current
+    ? {
+        TriageStatus: current.EffectiveStatus,
+        TriageNote: current.Note,
+        TriagedBy: current.TriagedBy,
+        TriagedDate: (current.TriagedAt || '').slice(0, 10),
+        TriageHasNewActivity: current.HasNewActivity,
+        TriageStale: current.IsStale,
+      }
+    : { TriageStatus: 'New' }
+  const ent = { EntityName: name, EntityType: type }
+
+  return (
+    <div>
+      {triageModal}
+      <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, display: 'block', marginBottom: 4 }}>
+        Triage
+      </Text>
+      <Space wrap size={6}>
+        <TriageTag record={display} />
+        <Button size="small" onClick={() => openTriage(ent, 'Investigating')}>Investigate</Button>
+        <Button size="small" onClick={() => openTriage(ent, 'Benign')}>Benign</Button>
+        <Button size="small" danger onClick={() => openTriage(ent, 'Escalated')}>Escalate</Button>
+        {display.TriageStatus !== 'New' && (
+          <Button size="small" type="text" onClick={() => openTriage(ent, 'New')}>Reset</Button>
+        )}
+      </Space>
+      {log.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          {log.map((e) => (
+            <div key={e.id} style={{ padding: '4px 0', borderBottom: `1px solid ${palette.border}` }}>
+              <Space size={6} wrap>
+                <Tag color={TRIAGE_COLORS[e.Status] ?? 'default'} style={{ fontSize: 10, margin: 0 }}>
+                  {e.Status}
+                </Tag>
+                <Text type="secondary" style={{ fontSize: 10 }}>
+                  {e.TriagedAt?.slice(0, 16).replace('T', ' ')} · {e.TriagedBy}
+                  {e.TotalRiskSnapshot != null ? ` · risk ${Number(e.TotalRiskSnapshot).toFixed(1)}` : ''}
+                </Text>
+              </Space>
+              {e.Note && <div style={{ fontSize: 11 }}>{e.Note}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Main drawer content ───────────────────────────────────────────────────────
 
-function DrawerContent({ record }) {
+function DrawerContent({ record, onTriageChanged }) {
   const { navigateTo } = useApp()
   const { name, type } = resolveEntity(record)
   const [episodes, setEpisodes] = useState([])
@@ -410,6 +487,9 @@ function DrawerContent({ record }) {
             </Tooltip>
           )}
         </Space>
+
+        {/* Triage state + audit log */}
+        <TriageSection name={name} type={type} onTriageChanged={onTriageChanged} />
 
         {/* Tactic set */}
         {record?.TacticSet && (
@@ -541,7 +621,7 @@ function DrawerContent({ record }) {
 
 // ── Hook ─────────────────────────────────────────────────────────────────────
 
-export function useEntityDetailDrawer() {
+export function useEntityDetailDrawer({ onTriageChanged } = {}) {
   const [state, setState] = useState({ open: false, record: null })
 
   const openDetail = useCallback(
@@ -571,7 +651,7 @@ export function useEntityDetailDrawer() {
       destroyOnClose
     >
       {state.open && state.record && (
-        <DrawerContent record={state.record} />
+        <DrawerContent record={state.record} onTriageChanged={onTriageChanged} />
       )}
     </Drawer>
   )

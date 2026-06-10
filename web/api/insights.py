@@ -111,6 +111,16 @@ def get_insights():
         if flag_mask is not None:
             top_flagged = df_to_records(pc[flag_mask].head(10))
 
+    # ── Triage queue: effective status counts across priority cases ──────────
+    triage_counts = {"New": 0, "Reopened": 0, "Investigating": 0, "Escalated": 0, "Benign": 0}
+    triage_stale_count = 0
+    if pc is not None and "TriageStatus" in pc.columns:
+        for s, c in pc["TriageStatus"].value_counts().items():
+            if s in triage_counts:
+                triage_counts[s] = int(c)
+        if "TriageStale" in pc.columns:
+            triage_stale_count = int(pc["TriageStale"].fillna(False).astype(bool).sum())
+
     # ── Historical run aggregates from DB ─────────────────────────────────────
     history_trend = []
     db = _db_path()
@@ -158,6 +168,8 @@ def get_insights():
         "total_users":          total_users,
         "suppressed_count":     suppressed_count,
         "flag_counts":          flag_counts,
+        "triage_counts":        triage_counts,
+        "triage_stale_count":   triage_stale_count,
         "tactic_distribution":  tactic_distribution,
         "workflow_breakdown":   workflow_breakdown,
         "top_detections":       top_detections,

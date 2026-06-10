@@ -10,6 +10,7 @@ import json
 import math
 import os
 import sqlite3
+import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -19,6 +20,11 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(ROOT_DIR, "output")
 CONFIG_PATH = os.path.join(ROOT_DIR, "config.json")
 DATA_DIR = os.path.join(ROOT_DIR, "data")
+
+# triage.py lives at the repo root (shared with consolidate.py)
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+import triage as triage_store  # noqa: E402
 
 
 @dataclass
@@ -120,6 +126,36 @@ def _apply_suppressions() -> None:
             state.user_seasons, "AccountName", "User", suppressions, patterns
         )
     _rebuild_priority_cases()
+    _apply_triage()
+
+
+def _load_config() -> dict:
+    try:
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def triage_store_path() -> str:
+    return triage_store.resolve_store_path(_load_config(), ROOT_DIR)
+
+
+def _apply_triage() -> None:
+    """Stamp triage columns onto the in-memory priority_cases.
+
+    Called after every priority rebuild and after every triage write, so the
+    table reflects analyst state immediately. Triage never removes or re-ranks
+    rows — display columns only (the web UI does its own Benign filtering).
+    """
+    if state.priority_cases is None:
+        return
+    cfg = _load_config()
+    try:
+        states = triage_store.load_current_states(triage_store.resolve_store_path(cfg, ROOT_DIR))
+        state.priority_cases = triage_store.stamp_triage(state.priority_cases, states, cfg)
+    except Exception:
+        pass  # a broken triage store must never take down the dashboard
 
 
 def _load_suppression_map() -> dict:

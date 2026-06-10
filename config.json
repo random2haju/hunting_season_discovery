@@ -252,7 +252,7 @@
     ],
     "service_account_patterns": {
       "suffixes": ["$"],
-      "prefixes": ["svc-", "svc_", "svc.", "service-", "sa-", "sa_","srv"],
+      "prefixes": ["svc-", "svc_", "svc.", "service-", "sa-", "sa_","srv","rpad","rpap","svc"],
       "exact":    ["system", "network service", "local service", "anonymous logon",
                    "iusr", "iwam", "aspnet", "defaultaccount"]
     },
@@ -267,6 +267,11 @@
 
   "suppression": {
     "store_path": "output/suppressions.csv"
+  },
+
+  "triage": {
+    "store_path": "output/triage.db",
+    "stale_investigating_days": 7
   },
 
   "priority_history_weight": 0.5,
