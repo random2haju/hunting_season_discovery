@@ -252,7 +252,7 @@
     ],
     "service_account_patterns": {
       "suffixes": ["$"],
-      "prefixes": ["svc-", "svc_", "svc.", "service-", "sa-", "sa_","srv","rpad","rpap","svc"],
+      "prefixes": ["svc-", "svc_", "svc.", "service-", "sa-", "sa_","srv","rpad","rpap","svc","rpat","rpax"],
       "exact":    ["system", "network service", "local service", "anonymous logon",
                    "iusr", "iwam", "aspnet", "defaultaccount"]
     },
