@@ -101,8 +101,14 @@ The script implements a **scenes → episodes → seasons** model:
 - **Episode**: scenes on the same device within a 4-hour window (configurable via `episode_window_hours`)
 - **Season**: all episodes aggregated per device or user account
 - **Attack Chain**: devices linked by a shared `AccountName` (lateral movement pivot), detected via Union-Find
+- **Case**: a cluster of Device/User priority rows describing one incident, collapsed for the Priority Cases sheet (see Case clustering below)
 
-Pipeline order: `load_scenes` → `apply_prevalence_scoring` → `assign_episodes` → `build_episodes` → `build_seasons` → `build_attack_chains` → `write_excel`
+Pipeline order: `load_scenes` → `apply_prevalence_scoring` → `assign_episodes` → `build_episodes` → `build_seasons` → `build_attack_chains` → `build_priority_cases` (clusters cases) → `write_excel`
+
+### Case clustering (`casecluster.py`)
+The hunt produces one season row per Device and one per User, so a single user active on a single device surfaces as **two** Priority Cases rows for the same scenes — at fleet scale this roughly doubles the list. `cluster_priority_cases()` collapses rows that share scenes into one **case** via Union-Find over Device↔User nodes, keeping the highest-`CompositeScore` member as the anchor (ties → Device). It is **score-neutral** — like triage it only changes which row fronts the list and what is folded behind it (`CaseClusterId`, `ClusterMemberCount`, `RelatedEntities`); folded-in members stay fully visible in Device/User Seasons.
+
+The grouping preserves the signal each entity view exists for: one user on one device → one case; several users on one device → the device anchors; **one user across several devices → the user anchors** (the roaming/lateral-movement signal is never discarded). Linking reuses `attack_chain_hygiene` account hygiene (null/machine/service accounts never link; names domain-stripped + case-folded), and a **fan-out guard** (`priority_clustering.link_fan_out_threshold`, default = `attack_chain_hygiene.fan_out_threshold`) stops a high-prevalence admin/scanner account from welding the whole fleet into one mega-case — such an account still stands as its own case, it just doesn't absorb every device. Triage state propagates across a cluster: an anchor inherits the most-recent disposition among its members (`triage.states_with_cluster_propagation`), so a verdict set on a now-folded member doesn't resurface as New.
 
 ### Prevalence scoring
 `apply_prevalence_scoring()` adjusts each scene's `ScoreContribution` using per-`Evidence` device counts (not per `DetectionType` — that would incorrectly collapse all hits of one detection type into one bucket). Thresholds and multipliers live in `config.json`.
@@ -122,7 +128,7 @@ A pure-AI episode (`ai_share = 1`) collapses both bonuses to 1.0 (preserving the
 
 ### Excel output structure
 Sheets in order:
-1. **Priority Cases** — primary analyst view; eligible entities only, ranked by `TotalRisk`. AI/Dev-dominated single-tactic entities and analyst-suppressed entities are excluded here. Includes triage columns (`TriageStatus`, `TriageNote`, `TriagedBy`, `TriagedDate`, `TriageHasNewActivity`, `TriageStale`) stamped from `output/triage.db`; all rows stay in rank order regardless of triage state.
+1. **Priority Cases** — primary analyst view; eligible entities only, ranked by `CompositeScore`. AI/Dev-dominated single-tactic entities and analyst-suppressed entities are excluded here. Duplicate Device/User rows describing the same incident are collapsed into a single **case** (see Case clustering below) — the columns `CaseClusterId`, `ClusterMemberCount`, and `RelatedEntities` record the grouping. The list is then cut to actionable size by `priority_min_composite_score` (score floor) and `priority_max_cases` (top-N cap), counting cases not rows — entities below the floor (and folded-in members) remain visible in Device/User Seasons. The console prints a CompositeScore percentile distribution each run for tuning the floor. Includes triage columns (`TriageStatus`, `TriageNote`, `TriagedBy`, `TriagedDate`, `TriageHasNewActivity`, `TriageStale`) stamped from `output/triage.db`; all rows stay in rank order regardless of triage state.
 2. **Device Seasons** — all devices including `PrimaryWorkflowClass`, `EligibleForPriority`, `ExclusionReason`, `IsSuppressed`, `SuppressReason` columns.
 3. **User Seasons** — same as Device Seasons but user-centric.
 4. **Historical Anomalies** — anomaly-flagged eligible entities (Z-score spikes, new highs, tactic expansion). Ineligible entities filtered out.
@@ -219,6 +225,10 @@ New tactic categories not already in `config.json` will score as 1 and log a war
 | `workflow_classification.priority_score_override` | Severity escape hatch: an automation-dominated entity below the tactic minimum is still retained in Priority Cases when its `TotalRisk` ≥ this value (default 25.0; 0 disables). |
 | `workflow_classification.non_discountable_detection_types` | An automation-dominated entity below the tactic minimum is also retained in Priority Cases if any of its scenes carries one of these high-severity detections (MCP Config Tampered, credential dumps, agent persistence, …) — so a single critical hit on an AI/service host is never silently hidden. |
 | `ai_workflow_detection_discounts` | Per-DetectionType score multiplier applied only to scenes classified as `AIWorkflow`. Reduces noise from detections that are expected behaviour for AI agents (e.g. Claude calling AI provider APIs triggers "AI Data Exfiltration" but is not suspicious). Detection types not listed keep their full score (1.0). High-severity detections (credential theft, persistence, MCP tampering) should not be discounted. |
+| `priority_min_composite_score` | Minimum `CompositeScore` for a row to appear in Priority Cases (default 10.0; 0 disables). Below-floor entities stay in Device/User Seasons. Tune using the percentile distribution printed each run. |
+| `priority_max_cases` | Hard top-N cap on Priority Cases rows, applied after the score floor (default 150; 0 disables). Counts clustered cases, not raw rows. |
+| `priority_clustering.enabled` | Collapse duplicate Device/User priority rows that share scenes into one anchored case (default true). When false, every eligible entity stays its own row. |
+| `priority_clustering.link_fan_out_threshold` | An account on ≥ this many devices is treated as fan-out and is **not** used to link/merge cases (default falls back to `attack_chain_hygiene.fan_out_threshold` = 3). Prevents one shared admin/scanner account from welding the fleet into a single cluster. |
 | `suppression.store_path` | Path to the analyst suppression CSV relative to the script directory (default `output/suppressions.csv`). Managed via `suppress.py`. |
 | `suppression.pattern_store_path` | Path to the pattern suppression JSON file (default `output/pattern_suppressions.json`). Managed via the web dashboard Pattern Rules tab. |
 | `triage.store_path` | Path to the analyst triage SQLite store (default `output/triage.db`). Append-only `triage_log` table; deliberately separate from `hunt_history.db` so baseline resets never delete triage state. |
@@ -238,13 +248,15 @@ New tactic categories not already in `config.json` will score as 1 and log a war
 
 After each run the script appends one record per device and user to `output/hunt_history.db` (SQLite). On the next run this baseline is loaded, and Device Seasons / User Seasons gain extra columns:
 
-`PreviousScore`, `BaselineMean`, `BaselineMedian`, `BaselineStdDev`, `HistoricalMax`, `RunCount`, `ScoreDelta`, `ScoreDeltaPct`, `ZScore`, `IsNewHigh`, `IsScoreSpike`, `IsEmergingEntity`, `IsTacticExpansion`, `IsAdaptingTactics`, `NewTactics`
+`PreviousScore`, `BaselineMean`, `BaselineMedian`, `BaselineStdDev`, `HistoricalMax`, `RunCount`, `ScoreDelta`, `ScoreDeltaPct`, `ZScore`, `IsNewHigh`, `IsScoreSpike`, `IsEmergingEntity`, `IsTacticExpansion`, `IsAdaptingTactics`, `NewTactics`, `IsNewDevicePairing`, `NewPairings`
 
 Episodes sheet also gains: `VariationClusterCount`, `LargestVariationCluster`, `AdaptiveBehaviorFlag`, `AdaptiveBehaviorReason`, `BaseEpisodeScore`, `AIShare`, `EffectiveMultiplier`.
 
-Device/User Seasons sheets also gain: `TacticSet`, `MaxEpisodeVariationCluster`, `AdaptiveEpisodeCount`.
+Device/User Seasons sheets also gain: `TacticSet`, `PairingSet`, `MaxEpisodeVariationCluster`, `AdaptiveEpisodeCount`.
 
 **`IsAdaptingTactics`**: fires when the current run's tactic set contains a tactic never seen in any prior run for that entity. This is the canonical low-and-slow AI-agent signal — unlike `IsTacticExpansion` (which only catches count growth), `IsAdaptingTactics` also catches tactic *substitution*. `NewTactics` lists the specific new tactics as a comma-joined string. Protected by `minimum_runs_for_baseline`.
+
+**`IsNewDevicePairing`**: fires when the entity tripped alarms with a counterpart it has never been paired with in its baseline — for a **user**, a device outside its historical device set; for a **device**, a new account on it. This is the "stranger in the house" signal: residents, the janitor, and long-roaming admins are all in the baseline's memory, so a genuinely new pairing cleanly separates a long-established roaming account (huge historical set, nothing new) from one that *started* roaming this run. `NewPairings` lists the specific new counterpart names. Backed by the per-entity `PairingSet` column persisted to `hunt_history` (built from scored scenes only, so fully-discounted benign tooling registers no pairing). Protected by `minimum_runs_for_baseline`; carries the same +2.5 `HistoricalPriority` bonus as `IsAdaptingTactics`.
 
 A **Historical Anomalies** sheet (3rd in the workbook, before Attack Chains) surfaces entities where any flag is True, sorted by `HistoricalPriority` — a formula that rewards relative change weighted by absolute score magnitude. `IsAdaptingTactics` carries the same +2.5 priority bonus as `IsTacticExpansion` so that quietly-adapting entities surface even when their ZScore is low.
 
@@ -252,7 +264,7 @@ A **Historical Anomalies** sheet (3rd in the workbook, before Attack Chains) sur
 
 **If config scoring weights change significantly** (e.g. tactic weight increase), the existing baseline will produce inflated Z-scores for all entities. In that case, reset the baseline by deleting `output/hunt_history.db` or pointing `history.store_path` to a new file. Analyst triage state lives in the separate `output/triage.db` and survives a baseline reset.
 
-**Schema upgrades**: back up `hunt_history.db` before deploying script changes that modify the history schema. The `OutputVersion` constant in the script tracks schema versions.
+**Schema upgrades**: back up `hunt_history.db` before deploying script changes that modify the history schema. The `OutputVersion` constant in the script tracks schema versions (currently 2 — v2 added the `PairingSet` column; older DBs are auto-migrated via `ALTER TABLE` on the next run, and `IsNewDevicePairing` simply stays False until `minimum_runs_for_baseline` runs of pairing history accumulate).
 
 ## What stays out of git
 

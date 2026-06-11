@@ -28,9 +28,10 @@ import numpy as np
 import pandas as pd
 
 import triage as triage_store
+import casecluster
 
 REQUIRED_COLUMNS = {"Timestamp", "DeviceName", "AccountName", "DetectionType", "TacticCategory", "Evidence"}
-HISTORY_OUTPUT_VERSION = 1
+HISTORY_OUTPUT_VERSION = 2  # v2: added PairingSet (IsNewDevicePairing baseline)
 
 
 # ---------------------------------------------------------------------------
@@ -935,6 +936,18 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
         .apply(lambda x: ", ".join(sorted(x.dropna().unique())))
     )
 
+    # PairingSet: the set of counterpart entities this one tripped alarms with —
+    # for a user, the devices it was active on; for a device, the accounts active
+    # on it. Persisted to history so compute_historical_baselines can flag a
+    # pairing never seen in the entity's baseline (IsNewDevicePairing — the
+    # "stranger in the house" signal). Built from scored scenes only, so fully
+    # discounted benign tooling does not register a pairing.
+    other_col = "DeviceName" if entity_col == "AccountName" else "AccountName"
+    entity_pairing_sets = (
+        scored.groupby(entity_col)[other_col]
+        .apply(lambda x: ", ".join(sorted({str(v) for v in x.dropna() if str(v).strip()})))
+    )
+
     season_records = []
     for entity, ep_group in episodes.groupby(entity_col):
         ep_group = ep_group.sort_values("EpisodeRiskScore", ascending=False)
@@ -977,6 +990,8 @@ def build_seasons(episodes: pd.DataFrame, entity_col: str, tactic_weights: dict,
             "UniqueTactics":  int(entity_tactic_counts.get(entity, 0)),
             # Sorted comma-joined tactic names — used for cross-run tactic adaptation detection
             "TacticSet":      entity_tactic_sets.get(entity, ""),
+            # Counterpart devices/accounts — feeds IsNewDevicePairing across runs
+            "PairingSet":     entity_pairing_sets.get(entity, ""),
             # Variation cluster rollup: max cluster size and count of adaptive episodes
             "MaxEpisodeVariationCluster": int(
                 ep_group["LargestVariationCluster"].max()
@@ -1109,7 +1124,7 @@ def enrich_seasons_with_workflow(
     return seasons
 
 
-def build_priority_cases(device_seasons: pd.DataFrame, user_seasons: pd.DataFrame, cfg: dict = None) -> pd.DataFrame:
+def build_priority_cases(device_seasons: pd.DataFrame, user_seasons: pd.DataFrame, scenes: pd.DataFrame = None, cfg: dict = None) -> pd.DataFrame:
     """
     Combine eligible device and user season rows into a ranked Priority Investigation Cases table.
     Entities classified as AIWorkflow or DeveloperAutomation with fewer than the minimum required
@@ -1117,6 +1132,13 @@ def build_priority_cases(device_seasons: pd.DataFrame, user_seasons: pd.DataFram
 
     Ranking uses CompositeScore = TotalRisk + HistoricalPriority * priority_history_weight
     so that anomalous entities surface above equally-risky stable ones.
+
+    The ranked list is then cut down to an actionable size:
+      - priority_min_composite_score — rows below this CompositeScore are dropped
+        (they stay visible in Device/User Seasons); 0 disables.
+      - priority_max_cases — hard top-N cap applied after the floor; 0 disables.
+    A CompositeScore distribution summary is printed so the floor can be tuned
+    against real data without inspecting the output file.
     """
     def _prep(df, entity_type, entity_col):
         elig = df["EligibleForPriority"].fillna(True).astype(bool) if "EligibleForPriority" in df.columns \
@@ -1148,10 +1170,38 @@ def build_priority_cases(device_seasons: pd.DataFrame, user_seasons: pd.DataFram
         "PrimaryWorkflowClass", "AIWorkflowScenePct",
         "MaxEpisodeRisk", "FirstSeen", "LastSeen",
         "ZScore", "IsNewHigh", "IsScoreSpike", "IsTacticExpansion",
-        "IsAdaptingTactics", "IsEmergingEntity", "NewTactics",
+        "IsAdaptingTactics", "IsNewDevicePairing", "IsEmergingEntity",
+        "NewTactics", "NewPairings",
     ]
     available = [c for c in priority_cols if c in combined.columns]
-    return combined[available].sort_values("CompositeScore", ascending=False).reset_index(drop=True)
+    ranked = combined[available].sort_values("CompositeScore", ascending=False).reset_index(drop=True)
+
+    # Collapse duplicate Device/User rows describing one incident into a single
+    # anchored case before applying the floor/cap, so those count cases not rows.
+    if scenes is not None:
+        ranked = casecluster.cluster_priority_cases(ranked, scenes, cfg or {})
+
+    min_score = float((cfg or {}).get("priority_min_composite_score", 0) or 0)
+    max_cases = int((cfg or {}).get("priority_max_cases", 0) or 0)
+
+    scores = ranked["CompositeScore"].fillna(0)
+    pcts = scores.quantile([0.50, 0.75, 0.90, 0.95, 0.99])
+    if "ClusterMemberCount" in ranked.columns:
+        folded = int((ranked["ClusterMemberCount"] > 1).sum())
+        print(f"    Clustering: {len(ranked)} case(s); {folded} multi-entity cluster(s)")
+    print(f"    Cases (after clustering): {len(ranked)} — CompositeScore "
+          f"p50={pcts[0.50]:.1f} p75={pcts[0.75]:.1f} p90={pcts[0.90]:.1f} "
+          f"p95={pcts[0.95]:.1f} p99={pcts[0.99]:.1f} max={scores.max():.1f}")
+    print("    Cases at candidate floors: " +
+          "  ".join(f">={t}: {(scores >= t).sum()}" for t in (5, 10, 25, 50, 100)))
+
+    if min_score > 0:
+        ranked = ranked[scores >= min_score].reset_index(drop=True)
+        print(f"    Floor priority_min_composite_score={min_score} -> {len(ranked)} cases")
+    if max_cases > 0 and len(ranked) > max_cases:
+        ranked = ranked.head(max_cases).reset_index(drop=True)
+        print(f"    Cap priority_max_cases={max_cases} -> {len(ranked)} cases")
+    return ranked
 
 
 # ---------------------------------------------------------------------------
@@ -1310,7 +1360,7 @@ _HISTORY_COLS = [
     "EntityType", "EntityName", "SeasonScore", "HistoricalPriority", "EpisodeCount",
     "SceneCount", "UniqueTactics", "BehaviorFamilyCount", "TopBehaviorFamily",
     "CrossDeviceLink", "TopEpisodeScore", "TopTactic",
-    "TacticSet",
+    "TacticSet", "PairingSet",
 ]
 
 
@@ -1548,6 +1598,7 @@ def _build_history_row(
         "TopEpisodeScore":     float(row["MaxEpisodeRisk"]),
         "TopTactic":           top_tactic,
         "TacticSet":           str(row.get("TacticSet", "")),
+        "PairingSet":          str(row.get("PairingSet", "")),
     }
 
 
@@ -1609,7 +1660,8 @@ def append_to_history(
                 CrossDeviceLink     INTEGER NOT NULL DEFAULT 0,
                 TopEpisodeScore     REAL    NOT NULL,
                 TopTactic           TEXT    NOT NULL DEFAULT '',
-                TacticSet           TEXT    NOT NULL DEFAULT ''
+                TacticSet           TEXT    NOT NULL DEFAULT '',
+                PairingSet          TEXT    NOT NULL DEFAULT ''
             )
         """)
         # Schema migration: add columns introduced in later versions if they are missing.
@@ -1620,6 +1672,9 @@ def append_to_history(
         if "HistoricalPriority" not in existing_cols:
             con.execute("ALTER TABLE hunt_history ADD COLUMN HistoricalPriority REAL NOT NULL DEFAULT 0")
             print("  [HISTORY] Schema migrated: added HistoricalPriority column")
+        if "PairingSet" not in existing_cols:
+            con.execute("ALTER TABLE hunt_history ADD COLUMN PairingSet TEXT NOT NULL DEFAULT ''")
+            print("  [HISTORY] Schema migrated: added PairingSet column")
         con.execute("""
             CREATE INDEX IF NOT EXISTS idx_entity
             ON hunt_history (EntityType, EntityName, RunTimestampEpoch DESC)
@@ -1700,9 +1755,10 @@ def compute_historical_baselines(
                 "HistoricalMax", "RunCount", "ScoreDelta", "ScoreDeltaPct", "ZScore"]:
         seasons[col] = float("nan")
     for col in ["IsNewHigh", "IsScoreSpike", "IsZScoreAnomaly", "IsEmergingEntity",
-                "IsTacticExpansion", "IsAdaptingTactics"]:
+                "IsTacticExpansion", "IsAdaptingTactics", "IsNewDevicePairing"]:
         seasons[col] = False
     seasons["NewTactics"] = ""
+    seasons["NewPairings"] = ""
 
     # Filtering an empty history (first run) is safe — it yields an empty `prior`
     # and we fall through to the single no-history return below.
@@ -1805,6 +1861,30 @@ def compute_historical_baselines(
                     seasons.at[idx, "IsAdaptingTactics"] = True
                     seasons.at[idx, "NewTactics"] = ", ".join(sorted(new_tactics))
 
+            # IsNewDevicePairing: the entity tripped alarms with a counterpart it
+            # has never been paired with in its baseline — for a user, a device
+            # outside its historical device set; for a device, a new account.
+            # The strongest "stranger in the house" signal: residents, the janitor
+            # and long-roaming admins are all in the neighborhood's memory, so a
+            # genuinely new pairing separates them from an account that started
+            # roaming this run. Like IsAdaptingTactics it needs prior pairing data
+            # to diff against (rows predating the PairingSet migration are empty).
+            if "PairingSet" in ent_hist.columns:
+                current_pairs = {
+                    p.strip()
+                    for p in str(row.get("PairingSet", "")).split(",")
+                    if p.strip()
+                }
+                hist_pairs_union: set = set()
+                for ps_str in ent_hist["PairingSet"].dropna():
+                    hist_pairs_union.update(
+                        p.strip() for p in str(ps_str).split(",") if p.strip()
+                    )
+                new_pairs = current_pairs - hist_pairs_union
+                if hist_pairs_union and new_pairs:
+                    seasons.at[idx, "IsNewDevicePairing"] = True
+                    seasons.at[idx, "NewPairings"] = ", ".join(sorted(new_pairs))
+
         seasons.at[idx, "IsEmergingEntity"] = bool(
             run_count <= emerg_max_runs and current_score >= emerg_thresh
         )
@@ -1826,6 +1906,7 @@ def _compute_priority(row: "pd.Series") -> float:
         (2.0 if row.get("IsNewHigh") else 0.0) +
         (2.5 if row.get("IsTacticExpansion") else 0.0) +
         (2.5 if row.get("IsAdaptingTactics") else 0.0) +
+        (2.5 if row.get("IsNewDevicePairing") else 0.0) +
         (1.5 if row.get("IsEmergingEntity") else 0.0) +
         (1.0 if row.get("IsZScoreAnomaly") else 0.0)   # additive: Z already in base, this rewards it
     )
@@ -1843,13 +1924,14 @@ def generate_historical_anomalies(
     and return sorted by priority descending.
     """
     flag_cols = ["IsNewHigh", "IsScoreSpike", "IsZScoreAnomaly", "IsEmergingEntity",
-                 "IsTacticExpansion", "IsAdaptingTactics"]
+                 "IsTacticExpansion", "IsAdaptingTactics", "IsNewDevicePairing"]
     output_cols = [
         "EntityType", "EntityName", "TotalRisk", "HistoricalPriority",
         "PreviousScore", "ScoreDelta", "ScoreDeltaPct", "ZScore",
         "BaselineMean", "BaselineStdDev", "HistoricalMax", "RunCount",
         "IsNewHigh", "IsScoreSpike", "IsZScoreAnomaly", "IsEmergingEntity",
         "IsTacticExpansion", "IsAdaptingTactics", "NewTactics",
+        "IsNewDevicePairing", "NewPairings",
     ]
 
     def _prep(df, entity_type, entity_col):
@@ -2222,7 +2304,7 @@ def main():
     )
 
     print("[*] Building priority investigation cases...")
-    priority_cases = build_priority_cases(device_seasons, user_seasons, cfg)
+    priority_cases = build_priority_cases(device_seasons, user_seasons, scenes, cfg)
     print(f"    Priority cases: {len(priority_cases)}")
 
     # Stamp analyst triage state (separate store: output/triage.db) onto Priority
@@ -2230,6 +2312,8 @@ def main():
     try:
         t_path = triage_store.resolve_store_path(cfg, os.path.dirname(os.path.abspath(__file__)))
         t_states = triage_store.load_current_states(t_path)
+        # Anchors inherit the freshest disposition among their folded-in cluster members.
+        t_states = triage_store.states_with_cluster_propagation(priority_cases, t_states)
         priority_cases = triage_store.stamp_triage(priority_cases, t_states, cfg)
         if t_states and not priority_cases.empty:
             triaged = int((priority_cases["TriageStatus"] != "New").sum())

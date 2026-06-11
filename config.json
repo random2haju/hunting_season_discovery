@@ -275,6 +275,12 @@
   },
 
   "priority_history_weight": 0.5,
+  "priority_min_composite_score": 10.0,
+  "priority_max_cases": 150,
+  "priority_clustering": {
+    "enabled": true,
+    "link_fan_out_threshold": 3
+  },
 
   "history": {
     "enabled":                        true,

@@ -240,6 +240,48 @@ def effective_status(record, current_last_seen, stale_days_: float = DEFAULT_STA
     }
 
 
+def _parse_related(related: str) -> list:
+    """Parse a RelatedEntities cell ('User:jsmith, Device:host-b') into [(type, name)]."""
+    out = []
+    for part in str(related or "").split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        etype, ename = part.split(":", 1)
+        etype, ename = etype.strip(), ename.strip()
+        if etype in ("Device", "User") and ename:
+            out.append((etype, ename))
+    return out
+
+
+def states_with_cluster_propagation(df, states: dict) -> dict:
+    """Return a states dict where each clustered anchor inherits the most-recent
+    triage record among itself and its folded-in cluster members.
+
+    Case clustering (casecluster.py) folds duplicate Device/User rows into one
+    anchor, but triage records are keyed per entity. Without propagation, an
+    anchor whose disposition was set on a now-hidden member would resurface as
+    New. This surfaces the freshest member record on the anchor key — display
+    only; the underlying log is untouched. Requires a RelatedEntities column;
+    a no-op when absent.
+    """
+    if df is None or df.empty or "RelatedEntities" not in df.columns:
+        return states
+    merged = dict(states)
+    for _, row in df.iterrows():
+        related = _parse_related(row.get("RelatedEntities", ""))
+        if not related:
+            continue
+        anchor_key = (row.get("EntityType"), _entity_key(row.get("EntityName", "")))
+        candidates = [r for r in (
+            [states.get(anchor_key)] + [states.get((t, _entity_key(n))) for (t, n) in related]
+        ) if r]
+        if not candidates:
+            continue
+        merged[anchor_key] = max(candidates, key=lambda r: float(r.get("TriagedAtEpoch", 0) or 0))
+    return merged
+
+
 def stamp_triage(df, states: dict, cfg: dict):
     """Add triage columns to a priority-cases-shaped DataFrame
     (needs EntityType / EntityName columns; LastSeen used for the reopen rule).

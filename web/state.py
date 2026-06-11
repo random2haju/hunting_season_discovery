@@ -25,6 +25,7 @@ DATA_DIR = os.path.join(ROOT_DIR, "data")
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 import triage as triage_store  # noqa: E402
+import casecluster  # noqa: E402
 
 
 @dataclass
@@ -153,6 +154,7 @@ def _apply_triage() -> None:
     cfg = _load_config()
     try:
         states = triage_store.load_current_states(triage_store.resolve_store_path(cfg, ROOT_DIR))
+        states = triage_store.states_with_cluster_propagation(state.priority_cases, states)
         state.priority_cases = triage_store.stamp_triage(state.priority_cases, states, cfg)
     except Exception:
         pass  # a broken triage store must never take down the dashboard
@@ -281,6 +283,7 @@ def _historical_priority(row: pd.Series) -> float:
         (2.0 if row.get("IsNewHigh")          else 0.0) +
         (2.5 if row.get("IsTacticExpansion")  else 0.0) +
         (2.5 if row.get("IsAdaptingTactics")  else 0.0) +
+        (2.5 if row.get("IsNewDevicePairing") else 0.0) +
         (1.5 if row.get("IsEmergingEntity")   else 0.0) +
         (1.0 if row.get("IsZScoreAnomaly")    else 0.0)
     )
@@ -301,9 +304,11 @@ def _rebuild_priority_cases() -> None:
     try:
         with open(CONFIG_PATH) as f:
             cfg = json.load(f)
-        history_weight = float(cfg.get("priority_history_weight", 0.5))
     except Exception:
-        history_weight = 0.5
+        cfg = {}
+    history_weight = float(cfg.get("priority_history_weight", 0.5))
+    min_score = float(cfg.get("priority_min_composite_score", 0) or 0)
+    max_cases = int(cfg.get("priority_max_cases", 0) or 0)
 
     priority_cols = [
         "EntityType", "EntityName", "CompositeScore", "TotalRisk", "HistoricalPriority",
@@ -312,7 +317,8 @@ def _rebuild_priority_cases() -> None:
         "PrimaryWorkflowClass", "AIWorkflowScenePct",
         "MaxEpisodeRisk", "FirstSeen", "LastSeen",
         "ZScore", "IsNewHigh", "IsScoreSpike", "IsTacticExpansion",
-        "IsAdaptingTactics", "IsEmergingEntity", "NewTactics",
+        "IsAdaptingTactics", "IsNewDevicePairing", "IsEmergingEntity",
+        "NewTactics", "NewPairings",
     ]
 
     parts = []
@@ -341,7 +347,13 @@ def _rebuild_priority_cases() -> None:
         combined["TotalRisk"].fillna(0) + combined["HistoricalPriority"] * history_weight
     ).round(2)
     available = [c for c in priority_cols if c in combined.columns]
-    state.priority_cases = combined[available].sort_values("CompositeScore", ascending=False).reset_index(drop=True)
+    ranked = combined[available].sort_values("CompositeScore", ascending=False).reset_index(drop=True)
+    ranked = casecluster.cluster_priority_cases(ranked, state.scenes, cfg)
+    if min_score > 0:
+        ranked = ranked[ranked["CompositeScore"].fillna(0) >= min_score].reset_index(drop=True)
+    if max_cases > 0 and len(ranked) > max_cases:
+        ranked = ranked.head(max_cases).reset_index(drop=True)
+    state.priority_cases = ranked
 
 
 def _suppression_store_path() -> str:
