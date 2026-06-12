@@ -1970,6 +1970,568 @@ def generate_historical_anomalies(
 
 
 # ---------------------------------------------------------------------------
+# Cross-run slow kill chains (Recommendation A)
+# ---------------------------------------------------------------------------
+
+_SLOW_CHAIN_COLS = [
+    "EntityType", "EntityName", "ChainName", "ChainStatus", "ChainConfidence",
+    "StagesReached", "MissingStage", "SharedThread", "RunsSpanned", "SpanDays",
+    "FirstStageSeen", "LastStageSeen", "MatchedTimeline",
+]
+
+# Each stage is a list of tactics, ANY of which satisfies the stage. Stages must
+# be matched in forward time order. Kept 3-stage so the "Staging" alarm (depth =
+# n-1) means "collected but not yet exfiltrated" — the pre-exfil window.
+_DEFAULT_CHAIN_TEMPLATES = [
+    {"name": "Credential->Collection->Exfil",
+     "stages": [["CredentialAccess"], ["Collection"], ["Exfiltration"]]},
+    {"name": "Credential->LateralMovement->Exfil",
+     "stages": [["CredentialAccess"], ["LateralMovement"], ["Exfiltration"]]},
+    {"name": "Discovery->Collection->Exfil",
+     "stages": [["Discovery"], ["Collection"], ["Exfiltration"]]},
+]
+
+
+def _parse_set_str(s: str) -> set:
+    """Split a comma-joined set string into a set of trimmed non-empty tokens."""
+    return {t.strip() for t in str(s or "").split(",") if t.strip()}
+
+
+def _match_chain(run_obs: list, stages: list) -> list:
+    """
+    Greedy forward match of an entity's time-ordered per-RUN tactic sets against
+    one chain template. `run_obs` is a list of (epoch, run_id, tactic_set,
+    pairing_set) tuples sorted by epoch ascending — one entry per run.
+
+    Stage k is satisfied by the earliest run at index >= the run that satisfied
+    stage k-1 (NON-decreasing: a single run may satisfy consecutive stages whose
+    tactics co-occurred in it). Matching on per-run tactic SETS — rather than
+    per-(run, tactic) events — is the crux of correctness: within-run tactic
+    order is unknowable, so it must not influence the result. A chain that is
+    fully contained in one run therefore maps to a single distinct run, which the
+    caller drops as within-run co-occurrence (the episode layer's domain). Only a
+    chain that genuinely needs >= 2 runs to assemble is a "slow" chain.
+
+    Returns the list of matched (epoch, run_id, tactic, pairing_set) tuples, in
+    stage order (length == depth reached).
+    """
+    matched = []
+    ptr = 0
+    for stage in stages:
+        stage_tactics = list(stage)
+        found_idx = None
+        for k in range(ptr, len(run_obs)):
+            inter = run_obs[k][2] & set(stage_tactics)
+            if inter:
+                tac = next((t for t in stage_tactics if t in inter), sorted(inter)[0])
+                matched.append((run_obs[k][0], run_obs[k][1], tac, run_obs[k][3]))
+                found_idx = k
+                break
+        if found_idx is None:
+            break
+        ptr = found_idx  # non-decreasing: the next stage may reuse this same run
+    return matched
+
+
+def build_slow_chains(
+    device_seasons: "pd.DataFrame",
+    user_seasons: "pd.DataFrame",
+    history: "pd.DataFrame",
+    run_ts: "datetime",
+    cfg: dict,
+) -> "pd.DataFrame":
+    """
+    Cross-run "slow kill chain" detector (Recommendation A).
+
+    A single hunt run — and even the 72h KQL window — cannot connect a
+    credential-access scene in one run to a collection scene weeks later to an
+    exfil scene a month after that. But that staggered progression IS the
+    espionage harvest cycle, deliberately stretched to stay under every per-run
+    threshold. This pass assembles each entity's tactic history across runs (the
+    "corkboard") and flags entities that walked a dangerous tactic sequence in
+    FORWARD ORDER over time.
+
+    Unlike the per-run history flags (IsScoreSpike / IsAdaptingTactics / …) which
+    measure deviation from a baseline — and are therefore blinded once a patient
+    attacker is absorbed into that baseline — this detector is ABSOLUTE: it asks
+    "does this entity's accumulated history contain the chain?", so a slow ramp
+    cannot hide it.
+
+    Design (tunable via config `slow_chains`; see THREAT_RESEARCH_2025.md):
+      * Forward ordering — stage k must occur at or after stage k-1's timestamp.
+        Co-occurrence alone is not a chain; direction separates intent from
+        coincidence on a busy host.
+      * Multi-run requirement — the matched stages must span >= 2 distinct runs.
+        A chain that collapses into one run is the EPISODE layer's job; requiring
+        multiple runs keeps this detector orthogonal and genuinely "slow".
+      * Staging alarm — a chain that reached the stage before the final (exfil)
+        stage but not the final stage is reported as "Staging": data collected,
+        not yet shipped. This is the highest-value moment in the pipeline — the
+        only window where the loss can still be prevented.
+      * Shared-thread gating — confidence is boosted when one counterpart (an
+        account on a device, or a device for a user) persists across the
+        contributing runs. This is the primary false-positive control: it
+        separates a coordinated operation from a busy shared host that merely
+        touched every tactic for unrelated reasons. (Approximation: intersection
+        of the contributing runs' persisted PairingSets — the finest-grained
+        thread the history schema retains.)
+
+    Returns one row per (entity, matched template) at or above min_confidence,
+    sorted by ChainConfidence desc. Empty on the first run (no history to span).
+    """
+    sc_cfg = cfg.get("slow_chains", {})
+    if not sc_cfg.get("enabled", True):
+        return pd.DataFrame(columns=_SLOW_CHAIN_COLS)
+    if history is None or history.empty:
+        return pd.DataFrame(columns=_SLOW_CHAIN_COLS)
+
+    window_days = float(sc_cfg.get("window_days", 90))
+    min_conf    = float(sc_cfg.get("min_confidence", 45))
+    templates   = sc_cfg.get("templates", _DEFAULT_CHAIN_TEMPLATES)
+    tactic_weights = cfg.get("tactic_weights", {})
+
+    now_epoch    = run_ts.timestamp()
+    window_start = now_epoch - window_days * 86400.0
+
+    # Per-(EntityType, EntityName) list of per-RUN observations within the window:
+    # (epoch, run_id, tactic_set, pairing_set). Built from prior history rows
+    # (one row per run) plus a synthetic "current run" observation from the
+    # current seasons, so a chain whose final link lands THIS run alarms now.
+    run_obs_map: dict = {}
+
+    def _add(etype, name, epoch, run_id, tactic_set_str, pairing_set_str):
+        if epoch < window_start:
+            return
+        tset = _parse_set_str(tactic_set_str)
+        if not tset:
+            return
+        pset = _parse_set_str(pairing_set_str)
+        run_obs_map.setdefault((etype, str(name)), []).append(
+            (epoch, str(run_id), tset, pset))
+
+    if not history.empty:
+        for _, h in history.iterrows():
+            _add(h.get("EntityType"), h.get("EntityName"),
+                 float(h.get("RunTimestampEpoch") or 0.0), str(h.get("RunId", "")),
+                 h.get("TacticSet", ""), h.get("PairingSet", ""))
+
+    # Current-run observations + the set of entities currently suppressed/ineligible.
+    excluded: set = set()
+    for seasons_df, etype, ecol in [(device_seasons, "Device", "DeviceName"),
+                                    (user_seasons, "User", "AccountName")]:
+        if seasons_df is None or seasons_df.empty:
+            continue
+        for _, s in seasons_df.iterrows():
+            name = str(s[ecol])
+            suppressed = bool(s.get("IsSuppressed", False))
+            ineligible = "EligibleForPriority" in s.index and not bool(
+                pd.notna(s.get("EligibleForPriority")) and s.get("EligibleForPriority"))
+            if suppressed or ineligible:
+                excluded.add((etype, name))
+            _add(etype, name, now_epoch, "__current__",
+                 s.get("TacticSet", ""), s.get("PairingSet", ""))
+
+    rows = []
+    for (etype, name), run_obs in run_obs_map.items():
+        if (etype, name) in excluded:
+            continue
+        run_obs.sort(key=lambda r: r[0])  # stable sort by epoch ascending
+        for tmpl in templates:
+            stages = tmpl.get("stages", [])
+            n_stages = len(stages)
+            if n_stages < 2:
+                continue
+            matched = _match_chain(run_obs, stages)
+            depth = len(matched)
+            # Report only Complete (depth == n) or Staging (depth == n-1).
+            if depth < n_stages - 1:
+                continue
+            runs_spanned = len({m[1] for m in matched})
+            if runs_spanned < 2:
+                continue  # fully within one run => within-run co-occurrence, not slow
+
+            status = "Complete" if depth == n_stages else "Staging"
+            missing_stage = "" if status == "Complete" else " / ".join(stages[depth])
+
+            # Shared-thread: counterparts present in EVERY distinct contributing run.
+            run_psets = {m[1]: m[3] for m in matched}
+            thread_sets = [p for p in run_psets.values() if p]
+            shared = set.intersection(*thread_sets) if thread_sets else set()
+            thread_present = bool(shared)
+
+            # Confidence: status + the FP-killing shared thread + deliberate
+            # multi-run spread + tactic severity. Capped at 100.
+            status_score = 45.0 if status == "Complete" else 32.0
+            thread_score = 25.0 if thread_present else 0.0
+            span_score   = min(runs_spanned, 5) * 3.0
+            stage_weights = [max((tactic_weights.get(t, 1) for t in stage), default=1)
+                             for stage in stages[:depth]]
+            avg_w = sum(stage_weights) / len(stage_weights) if stage_weights else 1.0
+            severity_score = min(avg_w / 10.0, 1.0) * 13.0
+            confidence = round(min(status_score + thread_score + span_score + severity_score, 100.0), 1)
+            if confidence < min_conf:
+                continue
+
+            first_epoch = matched[0][0]
+            last_epoch  = matched[-1][0]
+            span_days   = round((last_epoch - first_epoch) / 86400.0, 1)
+            def _d(ep):
+                return datetime.fromtimestamp(ep, timezone.utc).strftime("%Y-%m-%d")
+            timeline = "; ".join(f"{m[2]}@{_d(m[0])}" for m in matched)
+            stages_reached = " -> ".join(m[2] for m in matched)
+
+            rows.append({
+                "EntityType": etype, "EntityName": name,
+                "ChainName": tmpl.get("name", "Chain"),
+                "ChainStatus": status, "ChainConfidence": confidence,
+                "StagesReached": stages_reached, "MissingStage": missing_stage,
+                "SharedThread": ", ".join(sorted(shared)[:3]) if shared else "",
+                "RunsSpanned": runs_spanned, "SpanDays": span_days,
+                "FirstStageSeen": _d(first_epoch), "LastStageSeen": _d(last_epoch),
+                "MatchedTimeline": timeline,
+            })
+
+    if not rows:
+        return pd.DataFrame(columns=_SLOW_CHAIN_COLS)
+    out = pd.DataFrame(rows)
+    # Staging before Complete at equal confidence — the pre-exfil window is the
+    # actionable one — but confidence dominates.
+    out["_st"] = (out["ChainStatus"] == "Staging").astype(int)
+    out = out.sort_values(["ChainConfidence", "_st"], ascending=[False, False]) \
+             .drop(columns="_st").reset_index(drop=True)
+    return out[_SLOW_CHAIN_COLS]
+
+
+def stamp_slow_chains(seasons: "pd.DataFrame", entity_col: str, entity_type: str,
+                      slow_chains: "pd.DataFrame") -> "pd.DataFrame":
+    """Stamp the best (highest-confidence) slow chain per entity onto its season row."""
+    seasons = seasons.copy()
+    seasons["SlowChainStatus"] = ""
+    seasons["SlowChainName"] = ""
+    seasons["SlowChainConfidence"] = 0.0
+    if slow_chains is None or slow_chains.empty:
+        return seasons
+    mine = slow_chains[slow_chains["EntityType"] == entity_type]
+    if mine.empty:
+        return seasons
+    # slow_chains is already sorted by confidence desc, so first per entity is best.
+    best = mine.drop_duplicates(subset="EntityName", keep="first").set_index("EntityName")
+    for idx, row in seasons.iterrows():
+        name = str(row[entity_col])
+        if name in best.index:
+            b = best.loc[name]
+            seasons.at[idx, "SlowChainStatus"] = b["ChainStatus"]
+            seasons.at[idx, "SlowChainName"] = b["ChainName"]
+            seasons.at[idx, "SlowChainConfidence"] = float(b["ChainConfidence"])
+    return seasons
+
+
+# ---------------------------------------------------------------------------
+# Fleet-level detection outbreaks (the detection_history "bonus")
+# ---------------------------------------------------------------------------
+
+_OUTBREAK_COLS = [
+    "DetectionType", "Tactic", "OutbreakStatus", "OutbreakScore", "Severity",
+    "DeviceCountNow", "DeviceCountPrev", "NewDevices", "BaselineMeanDevices",
+    "SpreadSlope", "RunsSeenPrior", "SceneCountNow", "FirstSeen",
+]
+
+
+def load_detection_history(cfg: dict) -> pd.DataFrame:
+    """
+    Load the per-DetectionType, per-run footprint table written by
+    append_to_history. Returns empty on the first run, if history is disabled, or
+    if the DB predates this table (older schemas).
+    """
+    cols = ["RunId", "RunTimestamp", "RunTimestampEpoch", "DetectionType",
+            "SceneCount", "DeviceCount"]
+    empty = pd.DataFrame(columns=cols)
+    if not cfg.get("history", {}).get("enabled", True):
+        return empty
+    store_path = _resolve_store_path(cfg)
+    if not os.path.exists(store_path):
+        return empty
+    try:
+        con = sqlite3.connect(store_path)
+        tbl = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='detection_history'"
+        ).fetchone()
+        if tbl is None:
+            con.close()
+            return empty
+        df = pd.read_sql(
+            "SELECT * FROM detection_history ORDER BY DetectionType, RunTimestampEpoch ASC", con)
+        con.close()
+        return df
+    except Exception as exc:
+        print(f"  [WARN] Could not load detection history: {exc}")
+        return empty
+
+
+def _detection_severity(dt: str, cfg: dict) -> float:
+    """
+    Severity of a DetectionType, keyed on DetectionType alone (detection_history
+    carries no tactic). Drawn from the per-type score multiplier and the
+    non-discountable list, so a spreading NTDS/MCP-tamper/token-theft detection
+    scores high while spreading benign tooling scores ~1.0 and is gated out.
+    """
+    mult = float(cfg.get("detection_type_multipliers", {}).get(dt, 1.0))
+    non_disc = set(cfg.get("workflow_classification", {})
+                   .get("non_discountable_detection_types", []))
+    return max(mult, 2.0) if dt in non_disc else mult
+
+
+def _trend_slope(y: list) -> float:
+    """Least-squares slope of y over its index (devices per run). 0 for < 2 points.
+    Computed by hand to avoid numpy polyfit RankWarnings on flat series."""
+    n = len(y)
+    if n < 2:
+        return 0.0
+    xs = list(range(n))
+    xmean = sum(xs) / n
+    ymean = sum(y) / n
+    den = sum((x - xmean) ** 2 for x in xs)
+    if den == 0:
+        return 0.0
+    num = sum((xs[i] - xmean) * (y[i] - ymean) for i in range(n))
+    return num / den
+
+
+def build_outbreaks(
+    scenes: "pd.DataFrame",
+    detection_history: "pd.DataFrame",
+    run_ts: "datetime",
+    cfg: dict,
+) -> "pd.DataFrame":
+    """
+    Fleet-level "detection outbreak" surveillance — the population-scale
+    complement to build_slow_chains (per-entity).
+
+    Slow chains read one entity's longitudinal chart; this reads the whole
+    fleet's epidemic curve. It consumes the per-DetectionType, per-run footprint
+    table (`detection_history`, previously written but never read) and flags a
+    severe detection type whose *device footprint is climbing run-over-run* — a
+    campaign creeping device-to-device that is individually sub-threshold on every
+    host and so invisible to the per-entity layers. No single host looks alarming;
+    the trend in the population is the signal.
+
+    Two statuses (see config `outbreaks`):
+      * **Emerging** — a severe detection seen in <= emergence_max_prior_runs prior
+        runs and firing now. The fleet-level analog of IsEmergingEntity: a novel
+        TTP announcing itself.
+      * **Spreading** — a severe detection whose current device count exceeds its
+        baseline mean by spread_multiplier AND is rising (positive slope, above the
+        last run). The epidemic curve.
+
+    Severity gating (min_severity) is the crux: "LOLBin Execution spreading" is
+    weather; "NTDS Database Theft spreading" is an incident. Endemic detections
+    (steady on many devices) trip neither status and stay silent.
+
+    The table carries no entity names — this says *that* an outbreak is underway
+    and *which* detection; pivot to Slow Kill Chains / Seasons to find *who*.
+    Empty on the first run (no baseline to be new relative to).
+    """
+    ob_cfg = cfg.get("outbreaks", {})
+    if not ob_cfg.get("enabled", True):
+        return pd.DataFrame(columns=_OUTBREAK_COLS)
+    if detection_history is None or detection_history.empty:
+        return pd.DataFrame(columns=_OUTBREAK_COLS)
+    if scenes is None or scenes.empty or "DetectionType" not in scenes.columns:
+        return pd.DataFrame(columns=_OUTBREAK_COLS)
+
+    min_severity   = float(ob_cfg.get("min_severity", 1.5))
+    emerg_max      = int(ob_cfg.get("emergence_max_prior_runs", 1))
+    min_runs_trend = int(ob_cfg.get("min_runs_for_trend", 3))
+    spread_mult    = float(ob_cfg.get("spread_multiplier", 1.5))
+    trend_window   = int(ob_cfg.get("trend_window_runs", 4))
+    min_score      = float(ob_cfg.get("min_outbreak_score", 40))
+
+    # Current-run footprint per DetectionType — same definition the baseline was
+    # written with (distinct devices), so the comparison is apples-to-apples.
+    cur = scenes.groupby("DetectionType").agg(
+        DeviceCountNow=("DeviceName", "nunique"),
+        SceneCountNow=("DeviceName", "count"),
+    )
+    tactic_map = (scenes.dropna(subset=["DetectionType"])
+                  .groupby("DetectionType")["TacticCategory"]
+                  .agg(lambda x: x.mode().iat[0] if not x.mode().empty else ""))
+
+    rows = []
+    for dt, c in cur.iterrows():
+        severity = _detection_severity(dt, cfg)
+        if severity < min_severity:
+            continue
+        cur_devices = int(c["DeviceCountNow"])
+        prior = detection_history[detection_history["DetectionType"] == dt] \
+            .sort_values("RunTimestampEpoch")
+        runs_prior = len(prior)
+        prior_devs = [float(v) for v in prior["DeviceCount"].tolist()]
+        last_prior = prior_devs[-1] if prior_devs else 0.0
+        base_mean  = sum(prior_devs) / len(prior_devs) if prior_devs else 0.0
+
+        series = prior_devs + [float(cur_devices)]
+        if trend_window > 0:
+            series = series[-trend_window:]
+        slope = _trend_slope(series)
+        new_devices = max(0, cur_devices - int(last_prior))
+
+        if runs_prior <= emerg_max:
+            status = "Emerging"
+        elif (runs_prior >= min_runs_trend
+              and cur_devices >= base_mean * spread_mult
+              and cur_devices > last_prior and slope > 0):
+            status = "Spreading"
+        else:
+            continue
+
+        status_score   = 40.0 if status == "Emerging" else 30.0
+        severity_score = min(severity / 3.0, 1.0) * 30.0
+        spread_score   = min(max(float(new_devices), slope), 10.0) * 3.0
+        score = round(min(status_score + severity_score + spread_score, 100.0), 1)
+        if score < min_score:
+            continue
+
+        first_seen = (prior["RunTimestamp"].iloc[0] if runs_prior
+                      else run_ts.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        rows.append({
+            "DetectionType": dt, "Tactic": tactic_map.get(dt, ""),
+            "OutbreakStatus": status, "OutbreakScore": score,
+            "Severity": round(severity, 2),
+            "DeviceCountNow": cur_devices, "DeviceCountPrev": int(last_prior),
+            "NewDevices": new_devices, "BaselineMeanDevices": round(base_mean, 1),
+            "SpreadSlope": round(slope, 2), "RunsSeenPrior": runs_prior,
+            "SceneCountNow": int(c["SceneCountNow"]), "FirstSeen": first_seen,
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=_OUTBREAK_COLS)
+    out = pd.DataFrame(rows).sort_values("OutbreakScore", ascending=False).reset_index(drop=True)
+    return out[_OUTBREAK_COLS]
+
+
+# ---------------------------------------------------------------------------
+# Cross-layer campaign correlation (the John Snow overlay)
+# ---------------------------------------------------------------------------
+
+_CAMPAIGN_COLS = [
+    "DetectionType", "Tactic", "CampaignScore", "OutbreakStatus", "OutbreakScore",
+    "DeviceCountNow", "LinkedEntityCount", "StagingChains", "CompleteChains",
+    "LinkedEntities", "Rationale",
+]
+
+
+def build_campaigns(
+    slow_chains: "pd.DataFrame",
+    outbreaks: "pd.DataFrame",
+    cfg: dict,
+) -> "pd.DataFrame":
+    """
+    Cross-layer "campaign" correlation — the John Snow / Broad Street pump overlay.
+
+    build_slow_chains() reads each entity's longitudinal chart; build_outbreaks()
+    reads the fleet's epidemic curve. Either alone is ambiguous: a rising count
+    could be benign weather, and one chain could be a single unlucky host. This
+    join is the moment Snow overlaid the death map on the individual cases and saw
+    they shared one pump — it fires when one and the same signal is BOTH climbing
+    the population curve AND threaded through several individual kill chains, which
+    sporadic bad luck cannot explain. That intersection is a common-source,
+    coordinated campaign — the strongest signal the pipeline produces.
+
+    Join bridge: the outbreak's DetectionType carries a Tactic; a campaign is
+    raised when that tactic appears as a matched stage in >= `min_chain_entities`
+    distinct slow-chain entities. The detection type names the spreading pathogen;
+    the tactic is how it links into the chains (chain stages are tactic-keyed, so
+    the link is at the tactic level — the rationale string makes this explicit).
+
+    Returns one row per campaigning DetectionType, sorted by CampaignScore desc.
+    Empty unless BOTH layers are populated (needs an active outbreak and chains
+    spanning >= min_chain_entities entities for that tactic).
+    """
+    cmp_cfg = cfg.get("campaigns", {})
+    if not cmp_cfg.get("enabled", True):
+        return pd.DataFrame(columns=_CAMPAIGN_COLS)
+    if (slow_chains is None or slow_chains.empty
+            or outbreaks is None or outbreaks.empty):
+        return pd.DataFrame(columns=_CAMPAIGN_COLS)
+
+    min_entities = int(cmp_cfg.get("min_chain_entities", 2))
+    min_score    = float(cmp_cfg.get("min_campaign_score", 0))
+
+    # Pre-parse each chain's matched tactic set from StagesReached ("A -> B").
+    chain_rows = []
+    for _, ch in slow_chains.iterrows():
+        tactics = {t.strip() for t in str(ch.get("StagesReached", "")).split("->") if t.strip()}
+        chain_rows.append({
+            "EntityType": ch.get("EntityType", ""),
+            "EntityName": ch.get("EntityName", ""),
+            "ChainStatus": ch.get("ChainStatus", ""),
+            "ChainConfidence": float(ch.get("ChainConfidence", 0) or 0),
+            "tactics": tactics,
+        })
+
+    rows = []
+    for _, ob in outbreaks.iterrows():
+        tactic = str(ob.get("Tactic", "") or "").strip()
+        if not tactic:
+            continue
+        # Strongest chain per distinct entity that includes this tactic as a stage.
+        ent_best: dict = {}
+        for c in chain_rows:
+            if tactic not in c["tactics"]:
+                continue
+            key = (c["EntityType"], c["EntityName"])
+            if key not in ent_best or c["ChainConfidence"] > ent_best[key]["ChainConfidence"]:
+                ent_best[key] = c
+        if len(ent_best) < min_entities:
+            continue
+
+        linked = list(ent_best.values())
+        n = len(linked)
+        staging  = sum(1 for c in linked if c["ChainStatus"] == "Staging")
+        complete = sum(1 for c in linked if c["ChainStatus"] == "Complete")
+        avg_conf = sum(c["ChainConfidence"] for c in linked) / n
+        outbreak_score = float(ob.get("OutbreakScore", 0) or 0)
+
+        # CampaignScore: population signal + per-chain corroboration + breadth.
+        campaign_score = round(min(
+            100.0, 0.45 * outbreak_score + 0.45 * avg_conf + min(n, 5) * 4.0), 1)
+        if campaign_score < min_score:
+            continue
+
+        ranked = sorted(linked, key=lambda c: c["ChainConfidence"], reverse=True)
+        labels = [f"{c['EntityType']}:{c['EntityName']}" for c in ranked]
+        ent_display = ", ".join(labels[:5]) + (f" +{n - 5} more" if n > 5 else "")
+
+        status  = str(ob.get("OutbreakStatus", ""))
+        dev_now = int(ob.get("DeviceCountNow", 0) or 0)
+        rationale = (
+            f"{ob.get('DetectionType', '?')} is {status.lower()} across the fleet "
+            f"({dev_now} device{'s' if dev_now != 1 else ''}) and its tactic {tactic} "
+            f"links the slow kill chains of {n} entit{'ies' if n != 1 else 'y'} "
+            f"({staging} staging, {complete} complete) — a common-source signal."
+        )
+
+        rows.append({
+            "DetectionType": ob.get("DetectionType", ""),
+            "Tactic": tactic,
+            "CampaignScore": campaign_score,
+            "OutbreakStatus": status,
+            "OutbreakScore": outbreak_score,
+            "DeviceCountNow": dev_now,
+            "LinkedEntityCount": n,
+            "StagingChains": staging,
+            "CompleteChains": complete,
+            "LinkedEntities": ent_display,
+            "Rationale": rationale,
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=_CAMPAIGN_COLS)
+    out = pd.DataFrame(rows).sort_values("CampaignScore", ascending=False).reset_index(drop=True)
+    return out[_CAMPAIGN_COLS]
+
+
+# ---------------------------------------------------------------------------
 # Excel output
 # ---------------------------------------------------------------------------
 
@@ -1999,6 +2561,9 @@ def write_excel(
     tactic_weights: dict,
     cfg: dict,
     suppressed_entities: "pd.DataFrame | None" = None,
+    slow_chains: "pd.DataFrame | None" = None,
+    outbreaks: "pd.DataFrame | None" = None,
+    campaigns: "pd.DataFrame | None" = None,
 ):
     # SECURITY: disable xlsxwriter's default string→formula/URL conversion. Evidence
     # strings carry attacker-controlled command lines from monitored endpoints; a value
@@ -2063,6 +2628,25 @@ def write_excel(
         # 4. Historical Anomalies — anomaly-flagged eligible entities only
         if not historical_anomalies.empty:
             write_sheet("Historical Anomalies", historical_anomalies)
+
+        # 4b. Slow Kill Chains — cross-run tactic progressions (Recommendation A).
+        #     Staging rows (collected, not yet exfiltrated) are the pre-exfil
+        #     alarm; Complete rows are assembled harvest cycles. Empty on the
+        #     first run (no history to span).
+        if slow_chains is not None and not slow_chains.empty:
+            write_sheet("Slow Kill Chains", slow_chains)
+
+        # 4c. Detection Outbreaks — fleet-level epidemic curve: severe detections
+        #     spreading device-to-device. No entity names (pivot to Slow Kill
+        #     Chains / Seasons to find who). Empty on the first run.
+        if outbreaks is not None and not outbreaks.empty:
+            write_sheet("Detection Outbreaks", outbreaks, freeze_col=1)
+
+        # 4d. Campaigns — the cross-layer overlay: a detection that is BOTH an
+        #     outbreak AND threaded through >= 2 entities' slow chains. The
+        #     strongest, common-source signal. Empty unless both layers populate.
+        if campaigns is not None and not campaigns.empty:
+            write_sheet("Campaigns", campaigns, freeze_col=1)
 
         # 5. AI/Dev Automation Outliers — entities excluded from priority ranking
         def _build_outliers():
@@ -2296,6 +2880,31 @@ def main():
     if not historical_anomalies.empty:
         print(f"  [HISTORY] {len(historical_anomalies)} historical anomaly flag(s) detected")
 
+    print("[*] Detecting cross-run slow kill chains...")
+    slow_chains = build_slow_chains(device_seasons, user_seasons, history, run_ts, cfg)
+    device_seasons = stamp_slow_chains(device_seasons, "DeviceName", "Device", slow_chains)
+    user_seasons   = stamp_slow_chains(user_seasons,   "AccountName", "User", slow_chains)
+    if not slow_chains.empty:
+        n_staging  = int((slow_chains["ChainStatus"] == "Staging").sum())
+        n_complete = int((slow_chains["ChainStatus"] == "Complete").sum())
+        print(f"  [SLOWCHAIN] {len(slow_chains)} cross-run chain(s): "
+              f"{n_staging} Staging (pre-exfil), {n_complete} Complete")
+
+    print("[*] Detecting fleet-level detection outbreaks...")
+    detection_history = load_detection_history(cfg)   # load BEFORE appending current run
+    outbreaks = build_outbreaks(scenes, detection_history, run_ts, cfg)
+    if not outbreaks.empty:
+        n_emerg  = int((outbreaks["OutbreakStatus"] == "Emerging").sum())
+        n_spread = int((outbreaks["OutbreakStatus"] == "Spreading").sum())
+        print(f"  [OUTBREAK] {len(outbreaks)} detection outbreak(s): "
+              f"{n_emerg} Emerging, {n_spread} Spreading")
+
+    print("[*] Correlating cross-layer campaigns (outbreak + slow-chain overlay)...")
+    campaigns = build_campaigns(slow_chains, outbreaks, cfg)
+    if not campaigns.empty:
+        print(f"  [CAMPAIGN] {len(campaigns)} cross-layer campaign(s) correlated — "
+              f"common-source signal")
+
     append_to_history(
         device_seasons, user_seasons,
         device_episodes, user_episodes,
@@ -2352,7 +2961,8 @@ def main():
     print(f"\n[*] Writing Excel workbook...")
     write_excel(output_path, scenes, device_episodes, user_episodes, device_seasons, user_seasons,
                 attack_chains, historical_anomalies, priority_cases, tactic_weights, cfg,
-                suppressed_entities=suppressed_entities)
+                suppressed_entities=suppressed_entities, slow_chains=slow_chains,
+                outbreaks=outbreaks, campaigns=campaigns)
 
     # Summary to console
     print("\n" + "="*60)

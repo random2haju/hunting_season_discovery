@@ -1,0 +1,116 @@
+// ============================================================
+// Slow / Low-and-Slow Beacon C2
+// DetectionType: Slow Beacon C2
+// TacticCategory: CommandAndControl
+// Source: DeviceNetworkEvents
+//
+// Espionage C2 checks in once a day / once a week, often over HTTPS to a
+// legitimate cloud service so it blends in (see THREAT_RESEARCH_2025.md §3).
+// The existing c2_beaconing.kql requires 5+ connections inside a 1-DAY
+// window — a daily check-in produces ~1 connection/day and is missed
+// entirely. This query is the complement, designed for long dwell:
+//
+//   * Long analysis window (analysis_window, default 21d) instead of 1d.
+//   * LOW connection floor (min_connection_count, default 4) — we are
+//     looking for persistence over time, not volume.
+//   * REGULARITY test instead of a frequency test: the coefficient of
+//     variation of inter-connection gaps (stdev/mean) must be low, i.e.
+//     the check-ins are evenly spaced like an automated beacon.
+//   * Spread across multiple distinct DAYS (min_distinct_days).
+//
+// *** No first-seen baseline suppression. ***
+//   Every other query suppresses anything already seen in baseline_window.
+//   That is exactly wrong here: an implant older than the baseline has
+//   "graduated" into it and would be hidden forever. Long-dwell detection
+//   must look AT the persistent tail, so this query keeps only prevalence
+//   suppression (rare destination across the fleet) and a process/dest
+//   exclusion list — never a leftanti against its own history.
+//
+// Run cadence: heavier than the daily hunts (21d of network events). Run
+// WEEKLY or MONTHLY as a dedicated dwell review, not on the Mon/Wed/Fri
+// cadence. Mind ADX timeouts — narrow analysis_window if it is slow.
+// ============================================================
+let analysis_window      = 21d;
+let min_connection_count = 4;     // low: persistence over time, not volume
+let min_distinct_days    = 3;     // seen on at least N different days
+let min_avg_gap_seconds  = 1800;  // >= 30 min mean gap => "slow" (filters chatty apps)
+let max_jitter_ratio     = 0.35;  // stdev/mean of gaps; low => regular beacon
+let prevalence_threshold = 4;     // destination rare across the fleet
+
+// Processes that legitimately make regular long-lived outbound connections.
+let excluded_processes = dynamic([
+    "chrome.exe", "msedge.exe", "firefox.exe", "iexplore.exe", "opera.exe", "brave.exe",
+    "svchost.exe", "lsass.exe", "services.exe", "wininit.exe", "smss.exe",
+    "wuauclt.exe", "usoclient.exe", "musnotification.exe", "backgroundtaskhost.exe",
+    "mousocoreworker.exe", "waasmedic.exe", "searchhost.exe", "searchapp.exe",
+    "teams.exe", "ms-teams.exe", "onedrive.exe", "outlook.exe", "msedgewebview2.exe",
+    "officeclicktorun.exe", "appvshnotify.exe", "msteamsupdate.exe",
+    "mssense.exe", "msmpeng.exe", "nissrv.exe", "mpcmdrun.exe", "sense.exe",
+    "csfalconservice.exe", "csfalconservicehost.exe", "cswindiag.exe",
+    "code.exe", "cursor.exe", "git.exe", "gh.exe", "dropbox.exe", "slack.exe",
+    "ccmexec.exe", "sccm.exe", "dfsr.exe", "spotify.exe", "zoom.exe"
+]);
+
+// Connections, ordered per (device, process, destination) so we can measure
+// the gaps between successive check-ins.
+let ordered = materialize(
+    DeviceNetworkEvents
+    | where Timestamp > ago(analysis_window)
+    | where ActionType == "ConnectionSuccess"
+    | where isnotempty(RemoteIP)
+    | where tolower(InitiatingProcessFileName) !in~ (excluded_processes)
+    | where InitiatingProcessAccountName !endswith "$"
+    | extend Dest = iff(isnotempty(RemoteUrl), tostring(RemoteUrl), tostring(RemoteIP))
+    | project Timestamp, DeviceName, Proc = InitiatingProcessFileName,
+              RemoteIP, RemotePort, Dest,
+              AccountName = InitiatingProcessAccountName
+    | sort by DeviceName asc, Proc asc, Dest asc, Timestamp asc
+    | serialize
+    | extend Grp = strcat(DeviceName, "|", Proc, "|", Dest)
+    | extend Gap = iff(Grp == prev(Grp),
+                       datetime_diff('second', Timestamp, prev(Timestamp)),
+                       long(null))
+);
+
+let beacons = materialize(
+    ordered
+    | summarize
+        ConnectionCount = count(),
+        DistinctDays    = dcount(startofday(Timestamp)),
+        AvgGap          = avg(Gap),
+        StdevGap        = stdev(Gap),
+        FirstSeen       = min(Timestamp),
+        LastSeen        = max(Timestamp),
+        SamplePort      = take_any(RemotePort),
+        AccountName     = take_any(AccountName)
+        by DeviceName, Proc, Dest
+    | where ConnectionCount >= min_connection_count
+    | where DistinctDays    >= min_distinct_days
+    | where isnotnull(AvgGap) and AvgGap >= min_avg_gap_seconds
+    | extend Jitter = iff(AvgGap > 0, StdevGap / AvgGap, 999.0)
+    | where Jitter <= max_jitter_ratio
+    | extend AvgGapMin = round(AvgGap / 60.0, 1)
+    | extend Evidence = strcat(
+        "Beaconer: ", Proc,
+        " | Dest: ",  Dest,
+        " | Connections: ", tostring(ConnectionCount),
+        " | DistinctDays: ", tostring(DistinctDays),
+        " | AvgGapMin: ", tostring(AvgGapMin),
+        " | Jitter: ", tostring(round(Jitter, 2)),
+        " | Port: ",  tostring(SamplePort)
+    )
+    | project Timestamp = FirstSeen, DeviceName, AccountName,
+        DetectionType  = "Slow Beacon C2",
+        TacticCategory = "CommandAndControl",
+        Evidence, Dest
+);
+// ---- FP Reduction: prevalence only (NO first-seen suppression) ----
+let rare = beacons
+    | summarize DeviceCount = dcount(DeviceName) by Dest
+    | where DeviceCount <= prevalence_threshold
+    | project Dest;
+
+beacons
+| join kind=inner rare on Dest
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

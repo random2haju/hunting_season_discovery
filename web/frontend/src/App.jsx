@@ -1,12 +1,15 @@
 import React, { useEffect } from 'react'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import {
+  AimOutlined,
   ClockCircleOutlined,
   DashboardOutlined,
   LineChartOutlined,
+  NodeIndexOutlined,
   PlayCircleOutlined,
   RadarChartOutlined,
   ReloadOutlined,
+  RiseOutlined,
   StopOutlined,
   TableOutlined,
   UnorderedListOutlined,
@@ -22,6 +25,9 @@ import PriorityPage from './pages/PriorityPage'
 import SeasonsPage from './pages/SeasonsPage'
 import EpisodesPage from './pages/EpisodesPage'
 import HistoryPage from './pages/HistoryPage'
+import SlowChainsPage from './pages/SlowChainsPage'
+import OutbreaksPage from './pages/OutbreaksPage'
+import CampaignsPage from './pages/CampaignsPage'
 import SuppressionsPage from './pages/SuppressionsPage'
 import { api } from './api'
 
@@ -35,6 +41,9 @@ const NAV_ITEMS = [
   { key: '/seasons',      icon: <UnorderedListOutlined />, label: 'Seasons' },
   { key: '/episodes',     icon: <ClockCircleOutlined />,   label: 'Episode Timeline' },
   { key: '/history',      icon: <LineChartOutlined />,     label: 'Historical Trends' },
+  { key: '/slow-chains',  icon: <NodeIndexOutlined />,     label: 'Slow Kill Chains' },
+  { key: '/outbreaks',    icon: <RiseOutlined />,          label: 'Detection Outbreaks' },
+  { key: '/campaigns',    icon: <AimOutlined />,           label: 'Campaigns' },
   { key: '/suppressions', icon: <StopOutlined />,          label: 'Suppression Manager' },
 ]
 
@@ -144,6 +153,9 @@ function Shell() {
             <Route path="/seasons"      element={<SeasonsPage />} />
             <Route path="/episodes"     element={<EpisodesPage />} />
             <Route path="/history"      element={<HistoryPage />} />
+            <Route path="/slow-chains"  element={<SlowChainsPage />} />
+            <Route path="/outbreaks"    element={<OutbreaksPage />} />
+            <Route path="/campaigns"    element={<CampaignsPage />} />
             <Route path="/suppressions" element={<SuppressionsPage />} />
           </Routes>
         </Content>

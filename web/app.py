@@ -31,6 +31,9 @@ from api.priority import router as priority_router
 from api.seasons import router as seasons_router
 from api.episodes import router as episodes_router
 from api.history import router as history_router
+from api.slow_chains import router as slow_chains_router
+from api.outbreaks import router as outbreaks_router
+from api.campaigns import router as campaigns_router
 from api.suppressions import router as suppressions_router
 from api.recommendations import router as recommendations_router
 from api.patterns import router as patterns_router
@@ -88,6 +91,9 @@ app.include_router(priority_router, prefix="/api")
 app.include_router(seasons_router, prefix="/api")
 app.include_router(episodes_router, prefix="/api")
 app.include_router(history_router, prefix="/api")
+app.include_router(slow_chains_router, prefix="/api")
+app.include_router(outbreaks_router, prefix="/api")
+app.include_router(campaigns_router, prefix="/api")
 app.include_router(suppressions_router, prefix="/api")
 app.include_router(recommendations_router, prefix="/api")
 app.include_router(patterns_router, prefix="/api")

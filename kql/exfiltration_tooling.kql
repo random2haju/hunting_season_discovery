@@ -1,0 +1,139 @@
+// ============================================================
+// Exfiltration & Tunneling Tooling
+// DetectionType: Exfiltration Tooling
+// TacticCategory: Exfiltration
+// Source: DeviceProcessEvents
+//
+// MDE network events carry no byte counts, so generic exfil is detected
+// process-centrically (see THREAT_RESEARCH_2025.md §2). Three families:
+//
+//   1. Cloud-sync / transfer tools — rclone is the #1 real-world exfil
+//      tool (~57% of incidents) and is routinely RENAMED, so it is keyed
+//      on its command-line verbs (copy/sync/--config/cat/:remote:), not
+//      filename alone. Also MEGAcmd/MEGAsync, Restic, WinSCP/pscp,
+//      bitsadmin /transfer ... /upload, curl -T/-F.
+//   2. Tunnelers — ngrok, frpc/frps, chisel, plink -R, ssh -R/-L/-D,
+//      cloudflared tunnel, gost. One encrypted egress that looks like a
+//      single outbound connection.
+//   3. RMM agents — abused ~277% more YoY and a core state-actor TTP
+//      because the software is signed/legitimate. The high-signal variant
+//      is an RMM agent on a host that NEVER had one, which the first-seen
+//      baseline below provides for free.
+//
+// FP Reduction:
+//   - rclone/ssh keyed on command-line verbs so a developer simply having
+//     ssh.exe present is not flagged — only -R/-L/-D dynamic forwarding is
+//   - First-seen baselining is the load-bearing FP control for RMM:
+//     a sanctioned RMM already on a device falls into the baseline and is
+//     suppressed; only a NEW one on a given device surfaces
+//   - prevalence_threshold drops tools common across the fleet (i.e. the
+//     org's sanctioned RMM, which lives on many devices)
+//
+// NOTE: maintain `sanctioned_rmm` for your environment's approved remote
+// tools — listing them here removes the busiest FP source outright.
+//
+// Tuning:
+//   hunt_window          — how recent the reported events must be
+//   baseline_window      — total lookback including baseline period
+//   prevalence_threshold — suppress patterns seen on > N devices
+// ============================================================
+let hunt_window          = 72h;
+let baseline_window      = 14d;
+let prevalence_threshold = 5;
+
+// Approved remote-access tools in THIS environment — never flagged.
+// Leave empty if you sanction none; populate to kill the top FP source.
+let sanctioned_rmm = dynamic([
+    // "ScreenConnect.ClientService.exe", "TeamViewer.exe"
+]);
+
+// RMM agent process names (first-seen per device is the real signal).
+let rmm_tools = dynamic([
+    "anydesk.exe", "teamviewer.exe", "tv_w32.exe", "tv_x64.exe",
+    "screenconnect.clientservice.exe", "screenconnect.windowsclient.exe",
+    "atera_agent.exe", "ateraagent.exe", "syncro.exe", "splashtop.exe",
+    "sragent.exe", "strwinclt.exe", "netsupport.exe", "client32.exe",
+    "remoteutilities.exe", "rutserv.exe", "action1_agent.exe",
+    "dwagent.exe", "gotoassist.exe", "logmein.exe", "lmiguardiansvc.exe",
+    "supremo.exe", "aweray_remote.exe", "rustdesk.exe"
+]);
+
+// Tunneler process names (keyed by name; verbs add precision below).
+let tunnelers = dynamic([
+    "ngrok.exe", "frpc.exe", "frps.exe", "chisel.exe", "gost.exe",
+    "cloudflared.exe", "iox.exe", "ssf.exe", "nps.exe", "npc.exe"
+]);
+
+// Cloud-sync / transfer tools that double as exfil utilities.
+let transfer_tools = dynamic([
+    "rclone.exe", "megacmd.exe", "megaclient.exe", "megasync.exe",
+    "restic.exe", "winscp.exe", "winscp.com", "pscp.exe",
+    "filezilla.exe", "bbackupd.exe", "bztransmit.exe"
+]);
+
+let proc = materialize(
+    DeviceProcessEvents
+    | where Timestamp > ago(baseline_window)
+    | where InitiatingProcessAccountName !endswith "$"
+    | extend pn = tolower(FileName)
+    | where pn !in~ (sanctioned_rmm) and InitiatingProcessFileName !in~ (sanctioned_rmm)
+);
+
+// --- Family 1: transfer tools, OR any process driving rclone-style verbs ---
+let transfer_hits =
+    proc
+    | where pn in~ (transfer_tools)
+         // rename-resilient: rclone behaviour regardless of FileName
+         or ProcessCommandLine has_any (
+             " copy ", " copyto ", " sync ", " move ", " moveto ", " cat ",
+             "--config", "--transfers", "--multi-thread-streams",
+             ":remote:", "mega:", "b2:", "s3:", "drive:", "dropbox:")
+    | extend Kind = "transfer"
+;
+
+// --- Family 2: tunnelers, OR ssh/plink dynamic-forwarding flags ---
+let tunnel_hits =
+    proc
+    | where pn in~ (tunnelers)
+         or (pn in~ ("ssh.exe", "plink.exe")
+             and ProcessCommandLine has_any (" -R ", " -L ", " -D ", " -R\t", " -L\t", " -D\t"))
+         or (pn == "cloudflared.exe" and ProcessCommandLine has "tunnel")
+    | extend Kind = "tunnel"
+;
+
+// --- Family 3: RMM agents (first-seen per device carries the signal) ---
+let rmm_hits =
+    proc
+    | where pn in~ (rmm_tools)
+    | extend Kind = "rmm"
+;
+
+let all_suspicious = materialize(
+    union transfer_hits, tunnel_hits, rmm_hits
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "Process: ",  FileName,
+        " | Kind: ",  Kind,
+        " | CmdLine: ", ProcessCommandLine,
+        " | Parent: ", InitiatingProcessFileName,
+        " | Path: ",   FolderPath
+    )
+    | extend DetectionType  = "Exfiltration Tooling"
+    | extend TacticCategory = "Exfiltration"
+    | project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

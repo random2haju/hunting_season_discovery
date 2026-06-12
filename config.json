@@ -9,7 +9,7 @@
     "Persistence":         7,
     "Discovery":           3,
     "Exfiltration":        9,
-    "Collection":          6,
+    "Collection":          8,
     "Malware":             5,
     "SuspiciousActivity":  2,
     "UnwantedSoftware":    1,
@@ -28,7 +28,9 @@
       {"tactics": ["Discovery",        "CredentialAccess"],  "multiplier": 1.3},
       {"tactics": ["Discovery",        "LateralMovement"],   "multiplier": 1.3},
       {"tactics": ["CredentialAccess", "LateralMovement"],   "multiplier": 1.5},
+      {"tactics": ["CredentialAccess", "Collection"],        "multiplier": 1.3},
       {"tactics": ["CredentialAccess", "Exfiltration"],      "multiplier": 1.5},
+      {"tactics": ["Discovery",        "Collection"],        "multiplier": 1.2},
       {"tactics": ["LateralMovement",  "Exfiltration"],      "multiplier": 1.5},
       {"tactics": ["LateralMovement",  "CommandAndControl"], "multiplier": 1.4},
       {"tactics": ["Persistence",      "DefenseEvasion"],    "multiplier": 1.3},
@@ -65,7 +67,12 @@
     "Agent IPC Abuse":                      1.8,
     "AI Model Weight Exfiltration":         2.5,
     "Browser AI Token Theft":               2.5,
-    "RAG Unusual Access":                   1.5
+    "RAG Unusual Access":                   1.5,
+    "Archive Staging":                      1.5,
+    "Exfiltration Tooling":                 1.8,
+    "Slow Beacon C2":                       2.0,
+    "Cloud Token Theft":                    2.0,
+    "NTDS Database Theft":                  2.5
   },
   "detection_families": {
     "AI Data Exfiltration":           "AI",
@@ -159,7 +166,12 @@
     "Agent IPC Abuse":                "AgentAttack",
     "AI Model Weight Exfiltration":   "ModelTheft",
     "Browser AI Token Theft":         "TokenTheft",
-    "RAG Unusual Access":             "DataAccess"
+    "RAG Unusual Access":             "DataAccess",
+    "Archive Staging":                "DataStaging",
+    "Exfiltration Tooling":           "ExfilTooling",
+    "Slow Beacon C2":                 "CommandAndControl",
+    "Cloud Token Theft":              "TokenTheft",
+    "NTDS Database Theft":            "CredentialDump"
   },
   "episode_family_cap": 3,
   "episode_family_cap_multipliers": {
@@ -179,7 +191,9 @@
     "AgentAttack":       1.0,
     "ModelTheft":        1.0,
     "TokenTheft":        1.0,
-    "DataAccess":        1.0
+    "DataAccess":        1.0,
+    "DataStaging":       1.0,
+    "ExfilTooling":      1.0
   },
   "corroboration_bonus": {
     "min_families_for_bonus":      2,
@@ -261,7 +275,8 @@
     "non_discountable_detection_types": [
       "MCP Config Tampered", "Browser AI Token Theft", "AI Model Weight Exfiltration",
       "AI API Key Read", "Mimikatz Execution", "LSASS Memory Dump",
-      "Shadow Copy Deleted", "Security Service Disabled", "Agent Persistence Mechanism"
+      "Shadow Copy Deleted", "Security Service Disabled", "Agent Persistence Mechanism",
+      "NTDS Database Theft", "Cloud Token Theft"
     ]
   },
 
@@ -280,6 +295,36 @@
   "priority_clustering": {
     "enabled": true,
     "link_fan_out_threshold": 3
+  },
+
+  "slow_chains": {
+    "enabled":        true,
+    "window_days":    90,
+    "min_confidence": 45,
+    "templates": [
+      {"name": "Credential->Collection->Exfil",
+       "stages": [["CredentialAccess"], ["Collection"], ["Exfiltration"]]},
+      {"name": "Credential->LateralMovement->Exfil",
+       "stages": [["CredentialAccess"], ["LateralMovement"], ["Exfiltration"]]},
+      {"name": "Discovery->Collection->Exfil",
+       "stages": [["Discovery"], ["Collection"], ["Exfiltration"]]}
+    ]
+  },
+
+  "outbreaks": {
+    "enabled":                  true,
+    "min_severity":             1.5,
+    "emergence_max_prior_runs": 1,
+    "min_runs_for_trend":       3,
+    "spread_multiplier":        1.5,
+    "trend_window_runs":        4,
+    "min_outbreak_score":       40
+  },
+
+  "campaigns": {
+    "enabled":            true,
+    "min_chain_entities": 2,
+    "min_campaign_score": 0
   },
 
   "history": {

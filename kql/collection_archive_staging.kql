@@ -1,0 +1,124 @@
+// ============================================================
+// Archive Staging for Exfiltration
+// DetectionType: Archive Staging
+// TacticCategory: Collection
+// Source: DeviceProcessEvents + DeviceFileEvents
+//
+// The canonical espionage pre-exfil step (MITRE T1560.001 Archive via
+// Utility + T1074.001 Local Data Staging): enumerate files of interest,
+// copy them to a staging directory, compress with a PASSWORD and/or in
+// VOLUME-SPLIT parts, then exfiltrate hours later. WinRAR and 7-Zip
+// dominate; the passworded-split-RAR-in-ProgramData pattern is a 15-year-
+// old APT signature that still fires (see THREAT_RESEARCH_2025.md §1).
+//
+// Two signals (union, both DetectionType = "Archive Staging"):
+//   1. Archive utility executed with password / volume-split / recurse
+//      flags — the operator-driven shape, independent of where the
+//      archive lands.
+//   2. Archive file (.rar/.7z/.zip/.cab) CREATED in a classic staging
+//      path (ProgramData, PerfLogs, Recycle Bin, Temp, Windows\Temp).
+//
+// FP Reduction:
+//   - Backup/installer tooling excluded as archive creators
+//   - First-seen baselining suppresses a recurring legitimate backup that
+//     writes the same archive name to the same path every run
+//   - prevalence_threshold drops archive patterns common across the fleet
+//
+// Tuning:
+//   hunt_window          — how recent the reported events must be
+//   baseline_window      — total lookback including baseline period
+//   prevalence_threshold — suppress patterns seen on > N devices
+// ============================================================
+let hunt_window          = 72h;
+let baseline_window      = 14d;
+let prevalence_threshold = 5;
+
+// Archive utilities of interest (stem match — rename-resilient handled by
+// also keying signal 1 on command-line verbs, not filename alone).
+let archive_tools = dynamic([
+    "rar.exe", "winrar.exe", "7z.exe", "7za.exe", "7zg.exe",
+    "makecab.exe", "tar.exe", "wzzip.exe", "peazip.exe"
+]);
+// Processes that legitimately produce archives in bulk (tune per env).
+let benign_archivers = dynamic([
+    "msiexec.exe", "setup.exe", "vcpkg.exe",
+    "officeclicktorun.exe", "teamsupdate.exe",
+    "veeam.exe", "veeamagent.exe", "backup.exe", "duplicati.exe",
+    "wbengine.exe", "ntbackup.exe"
+]);
+// Classic local staging directories.
+let staging_paths = dynamic([
+    "\\programdata\\", "\\perflogs\\", "\\$recycle.bin\\",
+    "\\windows\\temp\\", "\\appdata\\local\\temp\\",
+    "\\users\\public\\", "\\intel\\", "\\$winreagent\\"
+]);
+
+// --- Signal 1: archive utility run with staging-flavoured flags ---
+let tool_hits = materialize(
+    DeviceProcessEvents
+    | where Timestamp > ago(baseline_window)
+    | where FileName in~ (archive_tools)
+    | where InitiatingProcessFileName !in~ (benign_archivers)
+    | where InitiatingProcessAccountName !endswith "$"
+    | where ProcessCommandLine has_any (
+        // password protection
+        " -hp", " -p", "-mhe=on", "-mhe on",
+        // volume splitting
+        " -v", "-v100m", "-v1g", "-v500m",
+        // add + recurse (archive build over a tree)
+        " a ", " -r ", " -r0", " -ssw"
+    )
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "Process: ",   FileName,
+        " | CmdLine: ", ProcessCommandLine,
+        " | Parent: ", InitiatingProcessFileName,
+        " | Path: ",   FolderPath,
+        " | Signal: stagingflags"
+    )
+    | project Timestamp, DeviceName, AccountName, Evidence
+);
+
+// --- Signal 2: archive file created in a staging directory ---
+let file_hits = materialize(
+    DeviceFileEvents
+    | where Timestamp > ago(baseline_window)
+    | where ActionType == "FileCreated"
+    | where FileName endswith ".rar" or FileName endswith ".7z"
+         or FileName endswith ".zip" or FileName endswith ".cab"
+         or FileName matches regex @"(?i)\.(r\d\d|7z\.\d{3}|z\d\d)$"   // split volumes .r00/.7z.001/.z01
+    | where FolderPath has_any (staging_paths)
+    | where InitiatingProcessFileName !in~ (benign_archivers)
+    | where InitiatingProcessAccountName !endswith "$"
+    | extend AccountName = InitiatingProcessAccountName
+    | extend Evidence = strcat(
+        "Archive: ",   FolderPath, "\\", FileName,
+        " | CreatedBy: ", InitiatingProcessFileName,
+        " | CmdLine: ", InitiatingProcessCommandLine,
+        " | Parent: ", InitiatingProcessParentFileName,
+        " | Signal: stagingpath"
+    )
+    | project Timestamp, DeviceName, AccountName, Evidence
+);
+
+let all_suspicious = materialize(
+    union tool_hits, file_hits
+    | extend DetectionType  = "Archive Staging"
+    | extend TacticCategory = "Collection"
+    | project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+);
+// ---- FP Reduction -----------------------------------------------
+let detections = all_suspicious | where Timestamp > ago(hunt_window);
+let baseline   = all_suspicious
+    | where Timestamp <= ago(hunt_window)
+    | distinct DeviceName, Evidence;
+let rare = detections
+    | summarize DeviceCount = dcount(DeviceName) by Evidence
+    | where DeviceCount <= prevalence_threshold
+    | project Evidence;
+
+detections
+| join kind=inner   rare     on Evidence
+| join kind=leftanti baseline on DeviceName, Evidence
+| project Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence
+| sort by Timestamp desc

@@ -50,8 +50,13 @@ The backend (`web/app.py`) is a FastAPI server that:
 | `/seasons` | Device + User Seasons | `GET /api/seasons/devices`, `/users` |
 | `/episodes` | Episode timeline | `GET /api/episodes`, `/user-episodes` |
 | `/history` | Historical trends (Plotly) | `GET /api/history` |
+| `/slow-chains` | Slow Kill Chains (cross-run tactic progressions) | `GET /api/slow-chains` |
+| `/outbreaks` | Detection Outbreaks (fleet-level epidemic curve) | `GET /api/outbreaks` |
+| `/campaigns` | Campaigns (cross-layer outbreak ∩ slow-chain overlay) | `GET /api/campaigns` |
 | `/stacking` | Stacking Analysis | `GET /api/stacking?family=` |
 | `/suppressions` | Suppression Manager | `GET/POST/DELETE /api/suppressions` |
+
+The `/slow-chains`, `/outbreaks`, and `/campaigns` modules are **read-only views** over the `Slow Kill Chains`, `Detection Outbreaks`, and `Campaigns` Excel sheets, loaded into `AppState` by `load_from_excel` (same pattern as Attack Chains / Historical Anomalies — not recomputed on suppression change). All three return `{data, loaded, meta}` where `meta` carries summary counts (staging/complete; emerging/spreading; campaign total + linked entities).
 
 **Adding a new API module**: create `web/api/<name>.py` with an `APIRouter`, register it in `web/app.py` under `prefix="/api"`, and add the fetch wrapper to `web/frontend/src/api.js`.
 
@@ -65,7 +70,7 @@ Set up a daily trigger pointing to `python run_hunt.py`. The script skips Saturd
 This is an **AI-focused cyber threat hunting pipeline** for Microsoft Defender for Endpoint (MDE). The pipeline targets AI-specific threats — MCP abuse, agentic AI attacks, model theft, token theft — where native EDR coverage is thin. The workflow has two distinct stages:
 
 ### Stage 1 — KQL queries (run manually in ADX)
-The `kql/` directory contains 15 standalone KQL queries, all targeting AI-specific threat categories. Each query is self-contained and must be run separately in ADX against MDE tables. Export results as CSV to `data/` named with the pattern `{tactic}_{detection}.csv` (e.g. `persistence_mcp_config.csv`). The filename prefix determines the tactic category used for scoring.
+The `kql/` directory contains 20 AI-specific + espionage-coverage KQL queries (plus the traditional set), each targeting a threat category. Each query is self-contained and must be run separately in ADX against MDE tables. Export results as CSV to `data/` named with the pattern `{tactic}_{detection}.csv` (e.g. `persistence_mcp_config.csv`). The filename prefix determines the tactic category used for scoring.
 
 **Query inventory:**
 | File | DetectionType | Signal |
@@ -85,6 +90,18 @@ The `kql/` directory contains 15 standalone KQL queries, all targeting AI-specif
 | `exfiltration_model_weights.kql` | AI Model Weight Exfiltration | Non-AI process reading .gguf/.safetensors/.pt |
 | `collection_rag_access.kql` | RAG Unusual Access | Non-AI process hitting local vector DB ports |
 | `credential_access_browser_ai_tokens.kql` | Browser AI Token Theft | Non-browser process reading browser credential stores |
+
+**Espionage-coverage queries** (added Jun 2026; grounded in `kql/THREAT_RESEARCH_2025.md` — 2025→2026 nation-state TTPs). These target the slow/quiet/legitimate-looking phases that the AI and crimeware-shaped queries miss:
+
+| File | DetectionType | Signal |
+|---|---|---|
+| `collection_archive_staging.kql` | Archive Staging | Password/split-volume archive built by, or written into, a staging path (T1560.001 + T1074.001) |
+| `exfiltration_tooling.kql` | Exfiltration Tooling | rclone-style transfer verbs, tunnelers (ngrok/chisel/ssh -R), and first-seen RMM agents |
+| `c2_slow_beacon.kql` | Slow Beacon C2 | Low-frequency, regularly-spaced beacon across many days — **no first-seen suppression** (see below) |
+| `credential_access_cloud_tokens.kql` | Cloud Token Theft | Non-owner process reading MSAL/Azure/AWS/gcloud/kube token caches |
+| `credential_access_ntds.kql` | NTDS Database Theft | ntdsutil IFM / shadow-copy *create* / esentutl / ntds.dit staged to non-standard path (T1003.003) |
+
+> **`c2_slow_beacon.kql` is intentionally different**: every other query suppresses anything already seen in `baseline_window` (`join kind=leftanti baseline`). Long-dwell C2 graduates into that baseline and would be hidden forever, so this query drops first-seen suppression and keeps only prevalence + a regularity (jitter) test over a 21d window. Run it on a **weekly/monthly dwell-review cadence**, not Mon/Wed/Fri — it scans far more network data.
 
 Every query outputs exactly 6 columns: `Timestamp, DeviceName, AccountName, DetectionType, TacticCategory, Evidence`. This contract must not be broken — the Python script validates it on load.
 
@@ -132,6 +149,9 @@ Sheets in order:
 2. **Device Seasons** — all devices including `PrimaryWorkflowClass`, `EligibleForPriority`, `ExclusionReason`, `IsSuppressed`, `SuppressReason` columns.
 3. **User Seasons** — same as Device Seasons but user-centric.
 4. **Historical Anomalies** — anomaly-flagged eligible entities (Z-score spikes, new highs, tactic expansion). Ineligible entities filtered out.
+4b. **Slow Kill Chains** — cross-run tactic progressions assembled from `hunt_history` (see *Cross-run slow kill chains* below). Only present when at least one chain is detected (never on the first run). Columns: `ChainName`, `ChainStatus` (Staging | Complete), `ChainConfidence`, `StagesReached`, `MissingStage`, `SharedThread`, `RunsSpanned`, `SpanDays`, `MatchedTimeline`.
+4c. **Detection Outbreaks** — fleet-level epidemic curve (see *Fleet-level detection outbreaks* below): severe detection types spreading device-to-device, from the `detection_history` table. Only present when a detection is `Emerging` or `Spreading` (never on the first run). Carries no entity names — pivot to Slow Kill Chains / Seasons to find *who*.
+4d. **Campaigns** — the cross-layer overlay (see *Cross-layer campaign correlation* below): a detection that is **both** an outbreak **and** threaded through ≥2 entities' slow chains. The strongest, common-source signal. Columns: `CampaignScore`, `OutbreakStatus`, `LinkedEntityCount`, `StagingChains`/`CompleteChains`, `LinkedEntities`, `Rationale`. Only present when both layers populate.
 5. **AI Dev Outliers** — entities excluded from priority ranking because they are automation-dominated (`AIWorkflow` / `DeveloperAutomation` / `ServiceAutomation`) with fewer than `priority_min_tactics_for_ai_dev` (default 2) distinct MITRE tactics. Entities meeting the severity escape hatch (`priority_score_override` or a `non_discountable_detection_types` hit) are retained in Priority Cases instead. Includes `ExclusionReason` column.
 6. **Suppressed Entities** — analyst-dispositioned false positives excluded from Priority Cases. Shown for audit. Only present when suppressions exist.
 7. **Attack Chains** — cross-device lateral movement chains.
@@ -243,6 +263,20 @@ New tactic categories not already in `config.json` will score as 1 and log a war
 | `history.emerging_entity_max_runs` | Entity must have appeared in ≤ this many prior runs to be flagged as emerging (default 2). |
 | `history.tactic_expansion_threshold` | Current UniqueTactics must exceed historical max by at least this delta to trigger IsTacticExpansion (default 1). |
 | `history.max_runs_per_entity` | Limit how many prior runs per entity are loaded for baseline calculation (default 90, 0=unlimited). |
+| `slow_chains.enabled` | Toggle the cross-run slow kill chain detector (default true). See *Cross-run slow kill chains*. |
+| `slow_chains.window_days` | Rolling lookback (default 90). Stage observations older than this are ignored, so a chain must assemble within this span. |
+| `slow_chains.min_confidence` | Minimum `ChainConfidence` (0–100) for a chain to surface (default 45). A staged chain with a shared thread scores ~57; a threadless complete chain ~60. |
+| `slow_chains.templates` | Ordered kill-chain templates. Each is `{name, stages}` where `stages` is a list of stages and each stage is a list of tactics, ANY of which satisfies it. Must be ≥ 2 stages (3-stage keeps the Staging alarm = "collected, not yet exfiltrated"). |
+| `outbreaks.enabled` | Toggle the fleet-level detection outbreak view (default true). See *Fleet-level detection outbreaks*. |
+| `outbreaks.min_severity` | Minimum DetectionType severity (from `detection_type_multipliers`, floored at 2.0 for `non_discountable_detection_types`) for an outbreak to surface (default 1.5). Gates out benign detections spreading. |
+| `outbreaks.emergence_max_prior_runs` | A severe detection seen in ≤ this many prior runs and firing now is `Emerging` (default 1). |
+| `outbreaks.min_runs_for_trend` | Minimum prior runs before a `Spreading` trend can fire (default 3); guards against thin baselines. |
+| `outbreaks.spread_multiplier` | Current device count must exceed baseline mean × this to be `Spreading` (default 1.5). |
+| `outbreaks.trend_window_runs` | How many recent runs (incl. current) the device-count slope is fit over (default 4). |
+| `outbreaks.min_outbreak_score` | Minimum `OutbreakScore` (0–100) to surface (default 40). |
+| `campaigns.enabled` | Toggle the cross-layer campaign correlation (default true). See *Cross-layer campaign correlation*. |
+| `campaigns.min_chain_entities` | Minimum distinct slow-chain entities whose tactic must match an outbreak for a campaign to fire (default 2 — the "≥2 case files" rule). |
+| `campaigns.min_campaign_score` | Minimum `CampaignScore` (0–100) to surface (default 0; the entity-count threshold is the real gate). |
 
 ## Historical score persistence
 
@@ -259,6 +293,38 @@ Device/User Seasons sheets also gain: `TacticSet`, `PairingSet`, `MaxEpisodeVari
 **`IsNewDevicePairing`**: fires when the entity tripped alarms with a counterpart it has never been paired with in its baseline — for a **user**, a device outside its historical device set; for a **device**, a new account on it. This is the "stranger in the house" signal: residents, the janitor, and long-roaming admins are all in the baseline's memory, so a genuinely new pairing cleanly separates a long-established roaming account (huge historical set, nothing new) from one that *started* roaming this run. `NewPairings` lists the specific new counterpart names. Backed by the per-entity `PairingSet` column persisted to `hunt_history` (built from scored scenes only, so fully-discounted benign tooling registers no pairing). Protected by `minimum_runs_for_baseline`; carries the same +2.5 `HistoricalPriority` bonus as `IsAdaptingTactics`.
 
 A **Historical Anomalies** sheet (3rd in the workbook, before Attack Chains) surfaces entities where any flag is True, sorted by `HistoricalPriority` — a formula that rewards relative change weighted by absolute score magnitude. `IsAdaptingTactics` carries the same +2.5 priority bonus as `IsTacticExpansion` so that quietly-adapting entities surface even when their ZScore is low.
+
+## Cross-run slow kill chains
+
+Every history *flag* above is a **deviation-from-baseline** detector — it fires when this run differs from the entity's own history. That is structurally blind to the patient adversary whose hallmark is steady, sub-threshold activity that never spikes, and worse, an attacker present from early runs is **absorbed into the baseline** and every deviation detector then measures them as normal. `build_slow_chains()` (in `consolidate.py`) is the **absolute** complement: it asks "does this entity's accumulated history *contain* a dangerous tactic sequence?", which baseline poisoning cannot hide.
+
+It assembles each entity's per-run `TacticSet` history (the "corkboard") and greedily matches it, **in forward time order**, against the `slow_chains.templates` (default: `CredentialAccess → Collection → Exfiltration`, plus credential→lateral and discovery→collection variants). Key design rules:
+
+- **Run-granularity matching** — stages are matched against each run's *tactic set*, not per-(run, tactic) events, because within-run tactic order is unknowable. A chain fully contained in one run therefore collapses to a single distinct run and is dropped (that is the episode/corroboration layer's job).
+- **Multi-run requirement** — matched stages must span **≥ 2 distinct runs**, keeping this detector orthogonal to within-run corroboration and genuinely "slow".
+- **Staging alarm** — a chain that reached the stage before the final (exfil) stage but not the final stage is reported as **`Staging`**: data collected, not yet shipped. This is the highest-value moment in the pipeline — the only window where the loss can still be prevented. A fully-assembled chain is **`Complete`**.
+- **Shared-thread gating** — `ChainConfidence` is boosted (+25) when one counterpart (an account on a device, a device for a user) persists across all contributing runs, computed as the intersection of the runs' persisted `PairingSet`s. This is the primary false-positive control: it separates a coordinated operation from a busy shared host that merely touched every tactic for unrelated reasons.
+
+Output goes to the **Slow Kill Chains** sheet (sorted by `ChainConfidence` desc, Staging tie-broken ahead of Complete) and stamps `SlowChainStatus` / `SlowChainName` / `SlowChainConfidence` onto Device/User Seasons. Suppressed and priority-ineligible entities are excluded. Empty on the first run (no history to span). Behaviour is covered by `test_slow_chains.py`.
+
+## Fleet-level detection outbreaks
+
+`build_slow_chains()` reads one entity's longitudinal chart; `build_outbreaks()` reads the **whole fleet's epidemic curve**. It is the population-scale complement, and it finally *consumes* the `detection_history` table (per-DetectionType, per-run device/scene footprint) that `append_to_history` has always written but nothing read. The signal it catches is a campaign creeping device-to-device that is individually sub-threshold on every host — invisible to the per-entity layers, but visible as a rising case count across the population.
+
+Per DetectionType it compares the current run's device footprint against that detection's prior-run baseline and emits one of two statuses (config `outbreaks`):
+
+- **Emerging** — a severe detection seen in ≤ `emergence_max_prior_runs` prior runs and firing now (the fleet-level analog of `IsEmergingEntity`: a novel TTP announcing itself).
+- **Spreading** — a severe detection whose current device count exceeds its baseline mean × `spread_multiplier` **and** is rising (positive least-squares slope over `trend_window_runs`, above the last run). The epidemic curve.
+
+**Severity gating (`min_severity`) is the crux** — keyed on DetectionType alone (the table has no tactic), drawn from `detection_type_multipliers` plus the `non_discountable_detection_types` list. "LOLBin Execution spreading" (severity 1.0) is weather; "NTDS Database Theft spreading" (2.5) is an incident. Endemic detections (severe but steady on many devices) trip neither status and stay silent. Output is the **Detection Outbreaks** sheet, sorted by `OutbreakScore`. The table carries no entity names by design: it says *that* an outbreak is underway and *which* detection — pivot to Slow Kill Chains / Seasons to find *who*. Empty on the first run. Covered by `test_outbreaks.py`.
+
+The two layers reinforce: a detection type that is **both** spreading across the fleet (outbreaks) **and** contributing links to multiple entities' slow chains (slow chains) is a coordinated campaign in progress — the strongest signal in the pipeline. That intersection is computed explicitly by the campaign correlation below.
+
+## Cross-layer campaign correlation
+
+`build_campaigns()` is the **John Snow / Broad Street pump overlay**: it joins the per-entity slow-chain layer to the fleet-level outbreak layer. Each alone is ambiguous — a rising count could be benign weather, and one chain could be a single unlucky host. A **campaign** is raised only when one and the same signal is *both* climbing the population curve *and* threaded through several individual kill chains, which sporadic coincidence cannot explain (a common source).
+
+The join bridge is the **tactic**: an outbreak's DetectionType carries a Tactic; a campaign fires when that tactic appears as a matched stage in ≥ `campaigns.min_chain_entities` (default 2) distinct slow-chain entities. The detection type names the spreading pathogen; the tactic is how it links into the chains (chain stages are tactic-keyed, so the link is at the tactic level — the `Rationale` string states this explicitly). `CampaignScore` blends the outbreak score, the linked chains' average confidence, and the breadth of linked entities. Output is the **Campaigns** sheet, sorted by `CampaignScore` desc. Empty unless **both** layers populate. Covered by `test_campaigns.py`.
 
 **First run**: no history exists, DB is created automatically, all flags are False (except `IsEmergingEntity` for entities above the score threshold).
 

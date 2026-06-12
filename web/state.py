@@ -42,6 +42,9 @@ class AppState:
     user_episodes: Optional[pd.DataFrame] = None
     attack_chains: Optional[pd.DataFrame] = None
     historical_anomalies: Optional[pd.DataFrame] = None
+    slow_chains: Optional[pd.DataFrame] = None
+    outbreaks: Optional[pd.DataFrame] = None
+    campaigns: Optional[pd.DataFrame] = None
     scenes: Optional[pd.DataFrame] = None
 
 
@@ -102,6 +105,9 @@ def load_from_excel(path: str) -> None:
     state.user_episodes   = _read_sheet(xl, "User Episodes")
     state.attack_chains = _read_sheet(xl, "Attack Chains")
     state.historical_anomalies = _read_sheet(xl, "Historical Anomalies")
+    state.slow_chains = _read_sheet(xl, "Slow Kill Chains")
+    state.outbreaks = _read_sheet(xl, "Detection Outbreaks")
+    state.campaigns = _read_sheet(xl, "Campaigns")
     state.scenes = _read_sheet(xl, "All Scenes")
     state.loaded_file = os.path.basename(path)
     state.is_loaded = True
